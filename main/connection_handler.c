@@ -16,6 +16,7 @@
 #define CH_TAG 			"Connection_handler"
 
 static SemaphoreHandle_t		ch_task_mutex				= NULL;
+static SemaphoreHandle_t		ch_settings_mutex			= NULL;
 static bool16					run_ch_task					= false;
 static RTC_DATA_ATTR uint32_t	first_sleep_timer			= TIMEOUT_FIRSTBOOT;
 static uint32_t 				uart_connection_timer 		= 0;
@@ -28,7 +29,7 @@ void ch_init()
 {
 	ch_deinit();
 
-	ch_uart_mutex				= xSemaphoreCreateMutex();
+	ch_settings_mutex			= xSemaphoreCreateMutex();
 	ch_uart_packet_timer_sem	= xSemaphoreCreateBinary();
 	ch_can_timer_sem			= xSemaphoreCreateBinary();
 	ch_sleep_sem				= xSemaphoreCreateBinary();
@@ -41,9 +42,9 @@ void ch_deinit()
 {
 	bool16 didDeInit = false;
 
-	if (ch_uart_mutex) {
-		vSemaphoreDelete(ch_uart_mutex);
-		ch_uart_mutex = NULL;
+	if (ch_settings_mutex) {
+		vSemaphoreDelete(ch_settings_mutex);
+		ch_settings_mutex = NULL;
 		didDeInit = true;
 	}
 
@@ -80,7 +81,10 @@ void ch_start_task()
 {
 	ch_stop_task();
 
+	xSemaphoreTake(ch_settings_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
 	run_ch_task = true;
+	xSemaphoreGive(ch_settings_mutex);
+
 	ESP_LOGI(CH_TAG, "Task starting");
 	xSemaphoreTake(sync_task_sem, 0);
 	xTaskCreate(ch_task, "Connection_handling_process", TASK_STACK_SIZE, NULL, HANDLER_TSK_PRIO, NULL);
@@ -89,42 +93,52 @@ void ch_start_task()
 
 void ch_stop_task()
 {
+	xSemaphoreTake(ch_settings_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
 	if (run_ch_task) {
 		run_ch_task = false;
+		xSemaphoreGive(ch_settings_mutex);
 		xSemaphoreTake(ch_task_mutex, portMAX_DELAY);
 		xSemaphoreGive(ch_task_mutex);
 		ESP_LOGI(CH_TAG, "Task stopped");
+	}
+	else {
+		xSemaphoreGive(ch_settings_mutex);
 	}
 }
 
 void ch_reset_uart_timer()
 {
-	xSemaphoreTake(ch_uart_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
+	xSemaphoreTake(ch_settings_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
 	if(!uart_connection_timer) {
+		xSemaphoreGive(ch_settings_mutex);
 		ble_stop_advertising();
 		ch_on_uart_connect();
+		xSemaphoreTake(ch_settings_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
 	}
 	uart_connection_timer = TIMEOUT_UARTCONNECTION;
-	xSemaphoreGive(ch_uart_mutex);
+	xSemaphoreGive(ch_settings_mutex);
 }
 
 bool16 ch_uart_connected()
 {
-	return uart_connection_timer;
+	xSemaphoreTake(ch_settings_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
+	bool16 connection_timer = uart_connection_timer != 0;
+	xSemaphoreGive(ch_settings_mutex);
+
+	return connection_timer;
 }
 
 bool16 ch_uart_connection_countdown()
 {
-	xSemaphoreTake(ch_uart_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
 	if(uart_connection_timer) {
 		if(--uart_connection_timer == 0) {
 			ble_start_advertising();
 			ch_on_uart_disconnect();
 		}
 	}
-	xSemaphoreGive(ch_uart_mutex);
+	bool16 connection_timer = uart_connection_timer != 0;
 
-	return uart_connection_timer;
+	return connection_timer;
 }
 
 void ch_task(void *arg)
@@ -134,20 +148,6 @@ void ch_task(void *arg)
 	ESP_LOGI(CH_TAG, "Task started");
 	while(run_ch_task)
 	{
-		//check TWAI state
-		twai_status_info_t status_info;
-		twai_get_status_info(&status_info);
-		if (status_info.state == TWAI_STATE_BUS_OFF)
-		{
-			ESP_LOGI(CH_TAG, "TWAI is off initiating recovery");
-			twai_initiate_recovery();
-		}
-		else if (status_info.state == TWAI_STATE_STOPPED)
-		{
-			ESP_LOGI(CH_TAG, "TWAI is off starting");
-			twai_start();
-		}
-
 		//count down our first boot timer
 		if(first_sleep_timer) {
 			first_sleep_timer--;
@@ -158,7 +158,7 @@ void ch_task(void *arg)
 			if (can_connection_timer) {
 				can_connection_timer--;
 			}
-#if ALLOW_SLEEP == TRUE
+#ifdef ALLOW_SLEEP
 			if(!can_connection_timer)
 				xSemaphoreGive(ch_sleep_sem);
 #endif

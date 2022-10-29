@@ -93,5 +93,6 @@ uint16_t    ble_get_delay_send();
 uint16_t    ble_get_delay_multi();
 bool16      ble_set_gap_name(char* name, bool16 set);
 bool16      ble_get_gap_name(char* name);
+bool16      ble_allow_connection();
 void        ble_stop_advertising();
 void        ble_start_advertising();

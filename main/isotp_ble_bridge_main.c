@@ -34,7 +34,7 @@ static uint16_t				split_enabled 			= false;
 static uint8_t 				split_count 			= 0;
 static uint16_t				split_length 			= 0;
 static uint8_t*				split_data 				= NULL;
-#if PASSWORD_CHECK
+#ifdef PASSWORD_CHECK
 static bool16				passwordChecked			= false;
 #else
 static bool16				passwordChecked			= true;
@@ -63,6 +63,7 @@ void isotp_user_debug(const char* message, ...) {
 
 bool16 setCpuFrequencyMhz(uint16_t max, uint16_t min)
 {
+#ifdef ALLOW_CPU_THROTTLE
 	//set config
 	esp_pm_config_esp32_t cpu_config;
 	cpu_config.max_freq_mhz = max;
@@ -71,6 +72,9 @@ bool16 setCpuFrequencyMhz(uint16_t max, uint16_t min)
 
 	//set cpu speed and return result
 	return esp_pm_configure(&cpu_config);
+#else
+	return true
+#endif
 }
 
 bool16 check_password(char* data)
@@ -131,14 +135,16 @@ static void isotp_processing_task(void *arg)
 			xSemaphoreTake(isotp_link_container->wait_for_isotp_data_sem, portMAX_DELAY);
 		}
         // poll
-		xSemaphoreTake(isotp_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
-        isotp_poll(link_ptr);
-        xSemaphoreGive(isotp_mutex);
+		tMUTEX(isotp_link_container->data_mutex);
+			isotp_poll(link_ptr);
+        rMUTEX(isotp_link_container->data_mutex);
+
         // receive
-		xSemaphoreTake(isotp_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
-        uint16_t out_size;
-        int ret = isotp_receive(link_ptr, payload_buf, isotp_link_container->buffer_size, &out_size);
-        xSemaphoreGive(isotp_mutex);
+		tMUTEX(isotp_link_container->data_mutex);
+			uint16_t out_size;
+			int ret = isotp_receive(link_ptr, payload_buf, isotp_link_container->buffer_size, &out_size);
+        rMUTEX(isotp_link_container->data_mutex);
+
         // if it is time to send fully received + parsed ISO-TP data over BLE and/or websocket
         if (ISOTP_RET_OK == ret) {
 			ESP_LOGI(BRIDGE_TAG, "Received ISO-TP message with length: %04X", out_size);
@@ -154,7 +160,7 @@ static void isotp_processing_task(void *arg)
 				uint16_t rxID = (time >> 16) & 0xFFFF;
 				uint16_t txID = time & 0xFFFF;
 				send_packet(txID, rxID, 0, payload_buf, out_size);
-				xSemaphoreGive(persist_message_send[number]);
+				persist_allow_send(number);
 			} else {
 				send_packet(link_ptr->receive_arbitration_id, link_ptr->send_arbitration_id, 0, payload_buf, out_size);
 			}
@@ -168,35 +174,35 @@ static void isotp_processing_task(void *arg)
 
 static void isotp_send_queue_task(void *arg)
 {
-	xSemaphoreTake(isotp_send_task_mutex, portMAX_DELAY);
-	ESP_LOGI(BRIDGE_TAG, "Send task started");
-	xSemaphoreGive(sync_task_sem);
-    while (isotp_run_tasks)
-    {
-        send_message_t msg;
-		if (xQueueReceive(isotp_send_message_queue, &msg, portMAX_DELAY) == pdTRUE) {
-			if (isotp_run_tasks) {
-				xSemaphoreTake(isotp_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
-				ESP_LOGI(BRIDGE_TAG, "isotp_send_queue_task: sending message with %d size (rx id: %04x / tx id: %04x)", msg.msg_length, msg.rxID, msg.txID);
-				for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++) {
-					IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[i];
-					if (msg.txID == isotp_link_container->link.receive_arbitration_id &&
-						msg.rxID == isotp_link_container->link.send_arbitration_id) {
-						ESP_LOGI(BRIDGE_TAG, "container match [%d]", i);
-						isotp_link_container_id = i;
-						isotp_send(&isotp_link_container->link, msg.buffer, msg.msg_length);
-						xSemaphoreGive(isotp_mutex);
-						xSemaphoreGive(isotp_link_container->wait_for_isotp_data_sem);
-						break;
+	tMUTEX(isotp_send_task_mutex);
+		ESP_LOGI(BRIDGE_TAG, "Send task started");
+		xSemaphoreGive(sync_task_sem);
+		while (isotp_run_tasks)
+		{
+			send_message_t msg;
+			if (xQueueReceive(isotp_send_message_queue, &msg, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
+				if (isotp_run_tasks) {
+					ESP_LOGD(BRIDGE_TAG, "isotp_send_queue_task: sending message with %d size (rx id: %04x / tx id: %04x)", msg.msg_length, msg.rxID, msg.txID);
+					for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++) {
+						IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[i];
+						if (msg.txID == isotp_link_container->link.receive_arbitration_id &&
+							msg.rxID == isotp_link_container->link.send_arbitration_id) {
+							ESP_LOGD(BRIDGE_TAG, "container match [%d]", i);
+							isotp_link_container_id = i;
+							tMUTEX(isotp_link_container->data_mutex);
+								isotp_send(&isotp_link_container->link, msg.buffer, msg.msg_length);
+							rMUTEX(isotp_link_container->data_mutex);
+							xSemaphoreGive(isotp_link_container->wait_for_isotp_data_sem);
+							break;
+						}
 					}
+					free(msg.buffer);
 				}
-				free(msg.buffer);
 			}
+			taskYIELD();
 		}
-		taskYIELD();
-	}
-	ESP_LOGI(BRIDGE_TAG, "Send task stopped");
-	xSemaphoreGive(isotp_send_task_mutex);
+		ESP_LOGI(BRIDGE_TAG, "Send task stopped");
+	rMUTEX(isotp_send_task_mutex);
     vTaskDelete(NULL);
 }
 
@@ -247,12 +253,6 @@ void isotp_deinit()
 {
 	bool16 didDeinit = false;
 
-	if (isotp_mutex) {
-		vSemaphoreDelete(isotp_mutex);
-		isotp_mutex = NULL;
-		didDeinit = true;
-	}
-
 	if (isotp_send_task_mutex) {
 		vSemaphoreDelete(isotp_send_task_mutex);
 		isotp_send_task_mutex = NULL;
@@ -278,7 +278,6 @@ void isotp_deinit()
 
 void isotp_init()
 {
-	isotp_mutex					= xSemaphoreCreateMutex();
 	isotp_send_task_mutex		= xSemaphoreCreateMutex();
 	isotp_send_message_queue	= xQueueCreate(ISOTP_QUEUE_SIZE, sizeof(send_message_t));
 
@@ -409,9 +408,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 						if(header->cmdSize == sizeof(uint16_t))
 						{   //confirm correct command size
 							uint16_t* delay = (uint16_t*)data;
-							persist_take_all_mutex();
 							persist_set_delay(*delay);
-							persist_give_all_mutex();
 							ESP_LOGI(BRIDGE_TAG, "Set persist delay [%08X]", *delay);
 							return true;
 						}
@@ -421,9 +418,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 						if(header->cmdSize == sizeof(uint16_t))
 						{   //confirm correct command size
 							uint16_t* delay = (uint16_t*)data;
-							persist_take_all_mutex();
 							persist_set_q_delay(*delay);
-							persist_give_all_mutex();
 							ESP_LOGI(BRIDGE_TAG, "Set persist queue delay [%08X]", *delay);
 							return true;
 						}
@@ -478,7 +473,6 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 				}
 			}
 		} else {
-			persist_take_all_mutex();
 			if (persist_enabled()) {
 				//We are in persistent mode
 				//Should we clear the persist messages in memory?
@@ -491,10 +485,8 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 				if ((header->cmdFlags & BLE_COMMAND_FLAG_PER_ENABLE) == 0)
 				{
 					persist_set(false);
-				}
-				else {
+				} else {
 					//If we are still in persist mode only accept setting changes
-					persist_give_all_mutex();
 					return false;
 				}
 			} else {
@@ -512,11 +504,9 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 				if (header->cmdFlags & BLE_COMMAND_FLAG_PER_ENABLE)
 				{
 					persist_set(true);
-					persist_give_all_mutex();
 					return false;
 				}
 			}
-			persist_give_all_mutex();
 
 			if (header->cmdSize)
 			{
@@ -689,7 +679,7 @@ void uart_data_received(const void* src, size_t size)
 	if(!ble_connected()) {
 		ch_reset_uart_timer();
 		packet_received(src, size);
-#if UART_ECHO
+#ifdef UART_ECHO
 		send_packet(0xFF, 0xFF, 0, src+sizeof(ble_header_t), size-sizeof(ble_header_t));
 #endif
 	}
@@ -700,9 +690,7 @@ void uart_data_received(const void* src, size_t size)
 void bridge_connect() 
 {
 	//clear persist
-	persist_take_all_mutex();
 	persist_clear();
-	persist_give_all_mutex();
 
 	//set to green
 	led_setcolor(LED_GREEN_QRT);
@@ -710,7 +698,7 @@ void bridge_connect()
 	//set full speed
 	setCpuFrequencyMhz(240, 40);
 
-#if PASSWORD_CHECK
+#ifdef PASSWORD_CHECK
 	//disable password support
 	passwordChecked = false;
 #endif
@@ -719,9 +707,7 @@ void bridge_connect()
 void bridge_disconnect()
 {
 	//clear persist
-	persist_take_all_mutex();
 	persist_clear();
-	persist_give_all_mutex();
 
 	//set led to low red
 	led_setcolor(LED_RED_EHT);
@@ -729,7 +715,7 @@ void bridge_disconnect()
 	//set slow speed
 	setCpuFrequencyMhz(80, 10);
 
-#if PASSWORD_CHECK
+#ifdef PASSWORD_CHECK
 	//disable password support
 	passwordChecked = false;
 #endif
@@ -798,6 +784,10 @@ void app_main(void)
 	//wait for sleep command
 	xSemaphoreTake(ch_sleep_sem, portMAX_DELAY);
 
+	//stop ble connections
+	ble_stop_advertising();
+	while (ble_connected());
+	
 	//stop tasks
 	ch_stop_task();
 	uart_stop_task();
@@ -813,8 +803,6 @@ void app_main(void)
 	led_deinit();
 	ch_deinit();
 	ble_server_shutdown();
-
-	vSemaphoreDelete(sync_task_sem);
 
 	//setup sleep timer
 	esp_sleep_enable_timer_wakeup(SLEEP_TIME * US_TO_S);

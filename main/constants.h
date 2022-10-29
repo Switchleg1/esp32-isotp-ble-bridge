@@ -1,7 +1,14 @@
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 /* --------------------- Definitions and static variables ------------------ */
+
+typedef int16_t							bool16;
+#define tMUTEX(x)						xSemaphoreTake(x, portMAX_DELAY)
+#define rMUTEX(x)						xSemaphoreGive(x)
 
 //Settings
 #define BRG_SETTING_ISOTP_STMIN			1
@@ -15,8 +22,7 @@
 
 #define TASK_STACK_SIZE					2048
 
-#define RX_TASK_PRIO 			 		3 // Ensure we drain the RX queue as quickly as we reasonably can to prevent overflow and ensure the message pump has fresh data.
-#define TX_TASK_PRIO 			 		3 // Ensure we TX messages as quickly as we reasonably can to meet ISO15765-2 timing constraints
+#define TWAI_TASK_PRIO 			 		3 // Ensure we TX messages as quickly as we reasonably can to meet ISO15765-2 timing constraints
 #define ISOTP_TSK_PRIO 					2 // Run the message pump at a higher priority than the main queue/dequeue task when messages are available
 #define MAIN_TSK_PRIO 					1 // Run the main task at the same priority as the BLE queue/dequeue tasks to help in delivery ordering.
 #define PERSIST_TSK_PRIO 				0
@@ -40,11 +46,12 @@
 #define TIMEOUT_UARTCONNECTION			120
 #define TIMEOUT_UARTPACKET				1
 
-#define ALLOW_SLEEP						FALSE
-#define SLEEP_TIME						10
+#define ALLOW_CPU_THROTTLE
+#define ALLOW_SLEEP
+#define SLEEP_TIME						5
 #define US_TO_S							1000000
 
-#define PASSWORD_CHECK					FALSE
+//#define PASSWORD_CHECK
 #define MAX_PASSWORD_LENGTH				64
 #define PASSWORD_KEY					"Password"
 #define PASSWORD_DEFAULT			   	"BLE2"
@@ -56,7 +63,7 @@
 #define CAN_CLK_IO						TWAI_IO_UNUSED
 #define CAN_BUS_IO						TWAI_IO_UNUSED
 #define CAN_MODE						TWAI_MODE_NORMAL
-#define CAN_ALERTS						TWAI_ALERT_NONE
+#define CAN_ALERTS						TWAI_ALERT_ABOVE_ERR_WARN | TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_OFF | TWAI_ALERT_BUS_RECOVERED
 #define CAN_FLAGS						ESP_INTR_FLAG_LEVEL1
 #define CAN_CLK_DIVIDER					0
 #define CAN_TIMING						TWAI_TIMING_CONFIG_500KBITS()
@@ -70,13 +77,11 @@
 #define UART_BAUD_RATE     				250000 //115200
 #define UART_BUFFER_SIZE				8192
 #define UART_INTERNAL_BUFFER_SIZE		2048
-#define UART_ECHO						0
+//#define UART_ECHO
 
 #define PERSIST_COUNT					2
 #define PERSIST_MAX_MESSAGE				64
 #define PERSIST_DEFAULT_MESSAGE_DELAY	20
 #define PERSIST_DEFAULT_QUEUE_DELAY		10
-
-typedef int16_t							bool16;
 
 #endif

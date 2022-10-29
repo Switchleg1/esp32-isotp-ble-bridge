@@ -69,9 +69,11 @@ static esp_gatt_if_t        spp_gatts_if 				    = 0xff;
 static QueueHandle_t        spp_send_queue 			        = NULL;
 static SemaphoreHandle_t    ble_congested			        = NULL;
 static SemaphoreHandle_t    ble_task_mutex                  = NULL;
+static SemaphoreHandle_t    ble_settings_mutex              = NULL;
 
 static bool16               enable_data_ntf 			    = false;
 static bool16               is_connected 				    = false;
+static bool16               allow_connection                = true;
 static esp_bd_addr_t        spp_remote_bda                  = {0x0,};
 
 static uint16_t             spp_handle_table[SPP_IDX_NB];
@@ -271,6 +273,22 @@ static void enable_notification() {
     server_callbacks.notifications_subscribed();
 }
 
+void ble_set_run_tasks(bool16 allowed)
+{
+    tMUTEX(ble_settings_mutex);
+        ble_run_tasks = allowed;
+    rMUTEX(ble_settings_mutex);
+}
+
+bool16 ble_allow_run_tasks()
+{
+    tMUTEX(ble_settings_mutex);
+        bool16 allowed = ble_run_tasks;
+    rMUTEX(ble_settings_mutex);
+
+    return allowed;
+}
+
 static void free_write_buffer(void)
 {
     temp_spp_recv_data_node_p1 = SppRecvDataBuff.first_node;
@@ -307,145 +325,145 @@ static void send_buffered_message(void)
 
 void send_task(void *pvParameters)
 {
-    xSemaphoreTake(ble_task_mutex, portMAX_DELAY);
-	send_message_t event;
-	while(ble_run_tasks) {
-        if (xQueueReceive(spp_send_queue, &event, portMAX_DELAY) == pdTRUE) {
-            //Are we shutting down?
-            if (ble_run_tasks) {
-                //If not continue
-                ESP_LOGI(BLE_TAG, "Sending message [%08X]", event.msg_length);
-                if (event.msg_length) {
-                    //Is GATT setup and ready to notify?
-                    if (!enable_data_ntf) {
-                        ESP_LOGI(BLE_TAG, "%s notifications not enabled, message deleted", __func__);
-                        free(event.buffer);
-                    }
-                    else
-                    {  	//Connected and notifications are enabled check for congestion
-                        xSemaphoreTake(ble_congested, pdMS_TO_TICKS(BLE_CONGESTION_MAX));
-                        xSemaphoreGive(ble_congested);
-
-                        uint32_t dataLength = event.msg_length + sizeof(ble_header_t);
-                        uint8_t* data = (uint8_t*)malloc(sizeof(uint8_t) * dataLength);
-                        if (data == NULL) {
-                            ESP_LOGE(BLE_TAG, "%s malloc.1 failed", __func__);
+    tMUTEX(ble_task_mutex);
+	    send_message_t event;
+	    while(ble_allow_run_tasks()) {
+            if (xQueueReceive(spp_send_queue, &event, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
+                //Are we shutting down?
+                if (ble_allow_run_tasks()) {
+                    //If not continue
+                    ESP_LOGI(BLE_TAG, "Sending message [%08X]", event.msg_length);
+                    if (event.msg_length) {
+                        //Is GATT setup and ready to notify?
+                        if (!enable_data_ntf) {
+                            ESP_LOGI(BLE_TAG, "%s notifications not enabled, message deleted", __func__);
                             free(event.buffer);
-                            break;
                         }
-                        memset(data, 0x0, dataLength);
-                        memcpy(data + sizeof(ble_header_t), event.buffer, event.msg_length);
-                        free(event.buffer);
+                        else
+                        {  	//Connected and notifications are enabled check for congestion
+                            xSemaphoreTake(ble_congested, pdMS_TO_TICKS(BLE_CONGESTION_MAX));
+                            xSemaphoreGive(ble_congested);
 
-                        //Build header
-                        ble_header_t* header = (ble_header_t*)data;
-                        header->hdID = BLE_HEADER_ID;
-                        header->cmdSize = event.msg_length;
-                        header->rxID = event.rxID;
-                        header->txID = event.txID;
+                            uint32_t dataLength = event.msg_length + sizeof(ble_header_t);
+                            uint8_t* data = (uint8_t*)malloc(sizeof(uint8_t) * dataLength);
+                            if (data == NULL) {
+                                ESP_LOGE(BLE_TAG, "%s malloc.1 failed", __func__);
+                                free(event.buffer);
+                                break;
+                            }
+                            memset(data, 0x0, dataLength);
+                            memcpy(data + sizeof(ble_header_t), event.buffer, event.msg_length);
+                            free(event.buffer);
 
-                        //Can we add more?
-                        while (dataLength < (spp_mtu_size - 3 - sizeof(ble_header_t)))
-                        {
-                            //Do we have any other responses ready to send?
-                            send_message_t nextEvent;
-                            if (xQueuePeek(spp_send_queue, (void*)&nextEvent, ble_delay_multi)) {
-                                //If we add this to the packet are we oversize?
-                                if (nextEvent.msg_length + sizeof(ble_header_t) + dataLength <= (spp_mtu_size - 3)) {
-                                    //We are good, add it but first remove it from the Queue
-                                    if (xQueueReceive(spp_send_queue, &nextEvent, 0) == pdTRUE) {
-                                        uint32_t nextDataLength = dataLength + nextEvent.msg_length + sizeof(ble_header_t);
-                                        uint8_t* nextData = (uint8_t*)malloc(sizeof(uint8_t) * nextDataLength);
-                                        if (nextData == NULL) {
-                                            ESP_LOGE(BLE_TAG, "%s malloc.1 failed", __func__);
+                            //Build header
+                            ble_header_t* header = (ble_header_t*)data;
+                            header->hdID = BLE_HEADER_ID;
+                            header->cmdSize = event.msg_length;
+                            header->rxID = event.rxID;
+                            header->txID = event.txID;
+
+                            //Can we add more?
+                            while (dataLength < (spp_mtu_size - 3 - sizeof(ble_header_t)))
+                            {
+                                //Do we have any other responses ready to send?
+                                send_message_t nextEvent;
+                                if (xQueuePeek(spp_send_queue, (void*)&nextEvent, ble_get_delay_multi())) {
+                                    //If we add this to the packet are we oversize?
+                                    if (nextEvent.msg_length + sizeof(ble_header_t) + dataLength <= (spp_mtu_size - 3)) {
+                                        //We are good, add it but first remove it from the Queue
+                                        if (xQueueReceive(spp_send_queue, &nextEvent, 0) == pdTRUE) {
+                                            uint32_t nextDataLength = dataLength + nextEvent.msg_length + sizeof(ble_header_t);
+                                            uint8_t* nextData = (uint8_t*)malloc(sizeof(uint8_t) * nextDataLength);
+                                            if (nextData == NULL) {
+                                                ESP_LOGE(BLE_TAG, "%s malloc.1 failed", __func__);
+                                                free(nextEvent.buffer);
+                                                break;
+                                            }
+                                            //Copy old data and newEvent buffer into newData
+                                            memset(nextData, 0x0, nextDataLength);
+                                            memcpy(nextData, data, dataLength);
+                                            memcpy(nextData + dataLength + sizeof(ble_header_t), nextEvent.buffer, nextEvent.msg_length);
                                             free(nextEvent.buffer);
+
+                                            //Build new header
+                                            ble_header_t* header = (ble_header_t*)(nextData + dataLength);
+                                            header->hdID = BLE_HEADER_ID;
+                                            header->cmdSize = nextEvent.msg_length;
+                                            header->rxID = nextEvent.rxID;
+                                            header->txID = nextEvent.txID;
+
+                                            //free old data and replace with new
+                                            free(data);
+                                            data = nextData;
+                                            dataLength = nextDataLength;
+
+                                            ESP_LOGI(BLE_TAG, "-Multisend Packet [%08X]-", nextEvent.msg_length);
+                                        }
+                                        else {
+                                            //This shouldn't happen?
                                             break;
                                         }
-                                        //Copy old data and newEvent buffer into newData
-                                        memset(nextData, 0x0, nextDataLength);
-                                        memcpy(nextData, data, dataLength);
-                                        memcpy(nextData + dataLength + sizeof(ble_header_t), nextEvent.buffer, nextEvent.msg_length);
-                                        free(nextEvent.buffer);
-
-                                        //Build new header
-                                        ble_header_t* header = (ble_header_t*)(nextData + dataLength);
-                                        header->hdID = BLE_HEADER_ID;
-                                        header->cmdSize = nextEvent.msg_length;
-                                        header->rxID = nextEvent.rxID;
-                                        header->txID = nextEvent.txID;
-
-                                        //free old data and replace with new
-                                        free(data);
-                                        data = nextData;
-                                        dataLength = nextDataLength;
-
-                                        ESP_LOGI(BLE_TAG, "-Multisend Packet [%08X]-", nextEvent.msg_length);
                                     }
                                     else {
-                                        //This shouldn't happen?
+                                        //Oversized dont add
                                         break;
                                     }
                                 }
                                 else {
-                                    //Oversized dont add
+                                    //Nothing waiting in Queue
                                     break;
                                 }
                             }
+
+                            //If payload is larger than MTU cut it up, this should only happen if its a single payload (multisend should not exceed mtu size)
+                            if (dataLength <= (spp_mtu_size - 3)) {
+                                esp_ble_gatts_send_indicate(spp_gatts_if, spp_conn_id, spp_handle_table[SPP_IDX_SPP_DATA_NTY_VAL], dataLength, data, false);
+                            }
                             else {
-                                //Nothing waiting in Queue
-                                break;
+                                //determine packet size for split packets
+                                uint16_t pack_size = spp_mtu_size - 3;
+
+                                //allocate space for payload chunk
+                                uint8_t* data_chunk = (uint8_t*)malloc(pack_size * sizeof(uint8_t));
+                                if (data_chunk == NULL) {
+                                    ESP_LOGE(BLE_TAG, "%s malloc.2 failed", __func__);
+                                    free(data);
+                                    break;
+                                }
+
+                                //First chunk
+                                uint16_t data_pos = pack_size;
+                                memcpy(data_chunk, data, pack_size);
+                                data_chunk[1] |= BLE_COMMAND_FLAG_SPLIT_PK;
+                                esp_ble_gatts_send_indicate(spp_gatts_if, spp_conn_id, spp_handle_table[SPP_IDX_SPP_DATA_NTY_VAL], pack_size, data_chunk, false);
+                                vTaskDelay(ble_get_delay_send());
+
+                                //send the chunks
+                                uint8_t chunk_num = 1;
+                                while (data_pos < dataLength)
+                                {
+                                    //constrain data len
+                                    uint16_t data_len = dataLength - data_pos;
+                                    if (data_len > pack_size - 2)
+                                        data_len = pack_size - 2;
+
+                                    data_chunk[0] = BLE_PARTIAL_ID;
+                                    data_chunk[1] = chunk_num++;
+                                    memcpy(data_chunk + 2, data + data_pos, data_len);
+                                    data_pos += data_len;
+                                    esp_ble_gatts_send_indicate(spp_gatts_if, spp_conn_id, spp_handle_table[SPP_IDX_SPP_DATA_NTY_VAL], data_len + 2, data_chunk, false);
+                                }
+                                free(data_chunk);
                             }
+                            free(data);
+                            vTaskDelay(ble_get_delay_send());
                         }
-
-                        //If payload is larger than MTU cut it up, this should only happen if its a single payload (multisend should not exceed mtu size)
-                        if (dataLength <= (spp_mtu_size - 3)) {
-                            esp_ble_gatts_send_indicate(spp_gatts_if, spp_conn_id, spp_handle_table[SPP_IDX_SPP_DATA_NTY_VAL], dataLength, data, false);
-                        }
-                        else {
-                            //determine packet size for split packets
-                            uint16_t pack_size = spp_mtu_size - 3;
-
-                            //allocate space for payload chunk
-                            uint8_t* data_chunk = (uint8_t*)malloc(pack_size * sizeof(uint8_t));
-                            if (data_chunk == NULL) {
-                                ESP_LOGE(BLE_TAG, "%s malloc.2 failed", __func__);
-                                free(data);
-                                break;
-                            }
-
-                            //First chunk
-                            uint16_t data_pos = pack_size;
-                            memcpy(data_chunk, data, pack_size);
-                            data_chunk[1] |= BLE_COMMAND_FLAG_SPLIT_PK;
-                            esp_ble_gatts_send_indicate(spp_gatts_if, spp_conn_id, spp_handle_table[SPP_IDX_SPP_DATA_NTY_VAL], pack_size, data_chunk, false);
-                            vTaskDelay(ble_delay_send);
-
-                            //send the chunks
-                            uint8_t chunk_num = 1;
-                            while (data_pos < dataLength)
-                            {
-                                //constrain data len
-                                uint16_t data_len = dataLength - data_pos;
-                                if (data_len > pack_size - 2)
-                                    data_len = pack_size - 2;
-
-                                data_chunk[0] = BLE_PARTIAL_ID;
-                                data_chunk[1] = chunk_num++;
-                                memcpy(data_chunk + 2, data + data_pos, data_len);
-                                data_pos += data_len;
-                                esp_ble_gatts_send_indicate(spp_gatts_if, spp_conn_id, spp_handle_table[SPP_IDX_SPP_DATA_NTY_VAL], data_len + 2, data_chunk, false);
-                            }
-                            free(data_chunk);
-                        }
-                        free(data);
-                        vTaskDelay(ble_delay_send);
                     }
                 }
             }
+		    taskYIELD();
         }
-		taskYIELD();
-    }
-    xSemaphoreGive(ble_task_mutex);
+    rMUTEX(ble_task_mutex);
 	vTaskDelete(NULL);
 }
 
@@ -474,31 +492,32 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
     esp_ble_gatts_cb_param_t *p_data = (esp_ble_gatts_cb_param_t *) param;
     uint8_t res = 0xff;
 
-	ESP_LOGI(BLE_TAG, "event = %x",event);
+	ESP_LOGD(BLE_TAG, "event = %x",event);
     switch (event) {
     	case ESP_GATTS_REG_EVT:
 			ESP_LOGI(BLE_TAG, "%s %d", __func__, __LINE__);
-			esp_ble_gap_set_device_name(ble_gap_name);
-
-			ESP_LOGI(BLE_TAG, "%s %d", __func__, __LINE__);
-			esp_ble_gap_config_adv_data_raw((uint8_t *)spp_adv_data, spp_adv_data[7] + 8);
+            tMUTEX(ble_settings_mutex);
+			    esp_ble_gap_set_device_name(ble_gap_name);
+			    ESP_LOGI(BLE_TAG, "%s %d", __func__, __LINE__);
+			    esp_ble_gap_config_adv_data_raw((uint8_t *)spp_adv_data, spp_adv_data[7] + 8);
+            rMUTEX(ble_settings_mutex);
 
 			ESP_LOGI(BLE_TAG, "%s %d", __func__, __LINE__);
         	esp_ble_gatts_create_attr_tab(spp_gatt_db, gatts_if, SPP_IDX_NB, SPP_SVC_INST_ID);
        	break;
-    	case ESP_GATTS_READ_EVT:
+        case ESP_GATTS_READ_EVT:
 			res = find_char_and_desr_index(p_data->read.handle);
             if(res == SPP_IDX_SPP_STATUS_VAL){
                 //TODO:client read the status characteristic
             }
-       	 break;
+        break;
     	case ESP_GATTS_WRITE_EVT: {
     	    res = find_char_and_desr_index(p_data->write.handle);
             if(p_data->write.is_prep == false){
 				ESP_LOGI(BLE_TAG, "ESP_GATTS_WRITE_EVT : handle = %d", res);
                 if(res == SPP_IDX_SPP_COMMAND_VAL){
                     //do nothing on spp commands
-                }else if(res == SPP_IDX_SPP_DATA_NTF_CFG){
+                } else if(res == SPP_IDX_SPP_DATA_NTF_CFG){
                     if((p_data->write.len == 2)&&(p_data->write.value[0] == 0x01)&&(p_data->write.value[1] == 0x00)){
                         enable_notification();
                     }else if((p_data->write.len == 2)&&(p_data->write.value[0] == 0x00)&&(p_data->write.value[1] == 0x00)){
@@ -538,17 +557,25 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
     	case ESP_GATTS_STOP_EVT:
         	break;
 		case ESP_GATTS_CONNECT_EVT:
+            ESP_LOGI(BLE_TAG, "GATTS Connecting");
 			spp_conn_id = p_data->connect.conn_id;
     	    spp_gatts_if = gatts_if;
-			is_connected = true;
+            tMUTEX(ble_settings_mutex);
+			    is_connected = true;
+            rMUTEX(ble_settings_mutex);
 			memcpy(&spp_remote_bda,&p_data->connect.remote_bda,sizeof(esp_bd_addr_t));
 			xSemaphoreGive(ble_congested);
+            ESP_LOGI(BLE_TAG, "GATTS Connected");
         	break;
 		case ESP_GATTS_DISCONNECT_EVT:
-			is_connected = false;
+            tMUTEX(ble_settings_mutex);
+			    is_connected = false;
+            rMUTEX(ble_settings_mutex);
 			disable_notification();
 			spp_mtu_size = DEFAULT_MTU_SIZE;
-			esp_ble_gap_start_advertising(&spp_adv_params);
+            ESP_LOGI(BLE_TAG, "GATTS Disconnected");
+            if(ble_allow_connection())
+			    esp_ble_gap_start_advertising(&spp_adv_params);
 			break;
     	case ESP_GATTS_OPEN_EVT:
     	    break;
@@ -588,7 +615,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
 
 static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
 {
-	ESP_LOGI(BLE_TAG, "EVT %d, gatts if %d", event, gatts_if);
+	ESP_LOGD(BLE_TAG, "EVT %d, gatts if %d", event, gatts_if);
 
     /* If event is register event, store the gatts_if for each profile */
     if (event == ESP_GATTS_REG_EVT) {
@@ -654,10 +681,12 @@ void ble_server_setup(ble_server_callbacks callbacks)
     esp_ble_gap_register_callback(gap_event_handler);
     esp_ble_gatts_app_register(ESP_SPP_APP_ID);
 
-    ble_run_tasks   = true;
-    ble_congested   = xSemaphoreCreateBinary();
-    ble_task_mutex  = xSemaphoreCreateMutex();
-    spp_send_queue  = xQueueCreate(BLE_QUEUE_SIZE, sizeof(send_message_t));
+    ble_congested       = xSemaphoreCreateBinary();
+    ble_task_mutex      = xSemaphoreCreateMutex();
+    ble_settings_mutex  = xSemaphoreCreateMutex();
+    spp_send_queue      = xQueueCreate(BLE_QUEUE_SIZE, sizeof(send_message_t));
+
+    ble_set_run_tasks(true);
     xTaskCreate(send_task, "BLE_sendTask", BLE_STACK_SIZE, NULL, BLE_TASK_PRIORITY, NULL);
 
     ESP_LOGE(BLE_TAG, "Server setup successful");
@@ -665,18 +694,20 @@ void ble_server_setup(ble_server_callbacks callbacks)
 
 void ble_server_shutdown()
 {
-    if (ble_run_tasks) {
+    if (ble_allow_run_tasks()) {
         ESP_LOGE(BLE_TAG, "Server shutting down");
 
         //set kill flag
-        ble_run_tasks = false;
+        ble_set_run_tasks(false);
 
         //with kill flag set we need to send a message to activate the task
         send_message_t msg;
+        msg.buffer = NULL;
         xQueueSend(spp_send_queue, &msg, portMAX_DELAY);
-        xSemaphoreTake(ble_task_mutex, portMAX_DELAY);
-        xSemaphoreGive(ble_task_mutex);
+        tMUTEX(ble_task_mutex);
+        rMUTEX(ble_task_mutex);
         vSemaphoreDelete(ble_task_mutex);
+        vSemaphoreDelete(ble_settings_mutex);
         vSemaphoreDelete(ble_congested);
 
         //clear and delete queue
@@ -709,7 +740,11 @@ void ble_send(uint32_t txID, uint32_t rxID, uint8_t flags, const void* src, size
 
 bool16 ble_connected()
 {
-	return is_connected;
+    tMUTEX(ble_settings_mutex);
+        bool16 connected = is_connected;
+    rMUTEX(ble_settings_mutex);
+
+	return connected;
 }
 
 uint16_t ble_queue_spaces()
@@ -724,22 +759,34 @@ uint16_t ble_queue_waiting()
 
 void ble_set_delay_send(uint16_t delay)
 {
-	ble_delay_send = delay;
+    tMUTEX(ble_settings_mutex);
+	    ble_delay_send = delay;
+    rMUTEX(ble_settings_mutex);
 }
 
 void ble_set_delay_multi(uint16_t delay)
 {
-	ble_delay_multi = delay;
+    tMUTEX(ble_settings_mutex);
+	    ble_delay_multi = delay;
+    rMUTEX(ble_settings_mutex);
 }
 
 uint16_t ble_get_delay_send()
 {
-	return ble_delay_send;
+    tMUTEX(ble_settings_mutex);
+        bool16 send_delay = ble_delay_send;
+    rMUTEX(ble_settings_mutex);
+
+	return send_delay;
 }
 
 uint16_t ble_get_delay_multi()
 {
-	return ble_delay_multi;
+    tMUTEX(ble_settings_mutex);
+        bool16 multi_delay = ble_delay_multi;
+    rMUTEX(ble_settings_mutex);
+
+	return multi_delay;
 }
 
 bool16 ble_set_gap_name(char* name, bool16 set)
@@ -749,14 +796,18 @@ bool16 ble_set_gap_name(char* name, bool16 set)
 		uint8_t len = strlen(name);
 		if(len <= MAX_GAP_LENGTH)
 		{
-			memset((char*)&spp_adv_data[9], 0, MAX_GAP_LENGTH);
-			memcpy((char*)&spp_adv_data[9], name, len);
-			spp_adv_data[7] = len+1;
+            tMUTEX(ble_settings_mutex);
+			    memset((char*)&spp_adv_data[9], 0, MAX_GAP_LENGTH);
+			    memcpy((char*)&spp_adv_data[9], name, len);
+			    spp_adv_data[7] = len+1;
+			    strcpy(ble_gap_name, name);
+			
+                if(set)
+				    esp_ble_gap_set_device_name(ble_gap_name);
 
-			strcpy(ble_gap_name, name);
-			if(set)
-				esp_ble_gap_set_device_name(ble_gap_name);
-			ESP_LOGI(BLE_TAG, "Set GAP name [%s]", ble_gap_name);
+			    ESP_LOGI(BLE_TAG, "Set GAP name [%s]", ble_gap_name);
+            rMUTEX(ble_settings_mutex);
+            return true;
 		}
 	}
 
@@ -768,19 +819,39 @@ bool16 ble_get_gap_name(char* name)
 {
 	if(name)
 	{
-		strcpy(name, ble_gap_name);
+        tMUTEX(ble_settings_mutex);
+		    strcpy(name, ble_gap_name);
+        rMUTEX(ble_settings_mutex);
+
 		return true;
 	}
 
 	return false;
 }
 
+bool16 ble_allow_connection()
+{
+    tMUTEX(ble_settings_mutex);
+        bool16 allowed = allow_connection;
+    rMUTEX(ble_settings_mutex);
+
+    return allowed;
+}
+
 void ble_stop_advertising()
 {
-	esp_ble_gap_stop_advertising();
+    tMUTEX(ble_settings_mutex);
+        allow_connection = false;
+    rMUTEX(ble_settings_mutex);
+
+    esp_ble_gap_stop_advertising();
 }
 
 void ble_start_advertising()
 {
-	esp_ble_gap_start_advertising(&spp_adv_params);
+    tMUTEX(ble_settings_mutex);
+        allow_connection = true;
+    rMUTEX(ble_settings_mutex);
+
+    esp_ble_gap_start_advertising(&spp_adv_params);
 }

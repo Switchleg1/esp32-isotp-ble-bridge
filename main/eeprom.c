@@ -100,6 +100,8 @@ char* eeprom_read_str(char* address)
 				free(strData);
 			}
 		}
+		ESP_LOGI(EEPROM_TAG, "Read failed - not stored");
+		return NULL;
 	}
 
 	ESP_LOGI(EEPROM_TAG, "Read failed - not initialized");

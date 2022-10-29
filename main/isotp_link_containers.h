@@ -7,6 +7,7 @@ typedef struct IsoTpLinkContainer {
     char    name[32];
     IsoTpLink link;
     SemaphoreHandle_t wait_for_isotp_data_sem;
+    SemaphoreHandle_t data_mutex;
     SemaphoreHandle_t task_mutex;
     uint8_t *recv_buf;
     uint8_t *send_buf;

@@ -30,10 +30,30 @@ static const twai_timing_config_t	t_config				= CAN_TIMING;
 static const twai_filter_config_t	f_config				= CAN_FILTER;
 static SemaphoreHandle_t			twai_receive_task_mutex = NULL;
 static SemaphoreHandle_t			twai_send_task_mutex	= NULL;
+static SemaphoreHandle_t			twai_alert_task_mutex	= NULL;
+static SemaphoreHandle_t			twai_bus_off_mutex		= NULL;
+static SemaphoreHandle_t			twai_settings_mutex		= NULL;
 static bool16						twai_run_task			= false;
 
 void twai_receive_task(void *arg);
 void twai_transmit_task(void *arg);
+void twai_alert_task(void* arg);
+
+void twai_set_run_task(bool16 allow)
+{
+	tMUTEX(twai_settings_mutex);
+		twai_run_task = allow;
+	rMUTEX(twai_settings_mutex);
+}
+
+bool16 twai_allow_run_task()
+{
+	tMUTEX(twai_settings_mutex);
+		bool16 run_task = twai_run_task;
+	rMUTEX(twai_settings_mutex);
+
+	return run_task;
+}
 
 void twai_init()
 {
@@ -57,6 +77,9 @@ void twai_init()
 
 	twai_receive_task_mutex = xSemaphoreCreateMutex();
 	twai_send_task_mutex	= xSemaphoreCreateMutex();
+	twai_alert_task_mutex	= xSemaphoreCreateMutex();
+	twai_bus_off_mutex		= xSemaphoreCreateMutex();
+	twai_settings_mutex		= xSemaphoreCreateMutex();
 	can_send_queue			= xQueueCreate(CAN_QUEUE_SIZE, sizeof(twai_message_t));
 
 	ESP_LOGI(TWAI_TAG, "Init");
@@ -86,6 +109,24 @@ void twai_deinit()
 		didDeInit = true;
 	}
 
+	if (twai_alert_task_mutex) {
+		vSemaphoreDelete(twai_alert_task_mutex);
+		twai_alert_task_mutex = NULL;
+		didDeInit = true;
+	}
+
+	if (twai_bus_off_mutex) {
+		vSemaphoreDelete(twai_bus_off_mutex);
+		twai_bus_off_mutex = NULL;
+		didDeInit = true;
+	}
+
+	if (twai_settings_mutex) {
+		vSemaphoreDelete(twai_settings_mutex);
+		twai_settings_mutex = NULL;
+		didDeInit = true;
+	}
+
 	if (didDeInit)
 		ESP_LOGI(TWAI_TAG, "Deinit");
 }
@@ -93,30 +134,38 @@ void twai_deinit()
 void twai_start_task()
 {
 	twai_stop_task();
-
-	twai_run_task = true;
+	twai_set_run_task(true);
 
 	ESP_LOGI(TWAI_TAG, "Tasks starting");
 	xSemaphoreTake(sync_task_sem, 0);
-	xTaskCreate(twai_receive_task, "TWAI_rx", TASK_STACK_SIZE, NULL, RX_TASK_PRIO, NULL);
+
+	xTaskCreate(twai_alert_task, "TWAI_alert", TASK_STACK_SIZE, NULL, TWAI_TASK_PRIO, NULL);
 	xSemaphoreTake(sync_task_sem, portMAX_DELAY);
-	xTaskCreate(twai_transmit_task, "TWAI_tx", TASK_STACK_SIZE, NULL, TX_TASK_PRIO, NULL);
+
+	xTaskCreate(twai_receive_task, "TWAI_rx", TASK_STACK_SIZE, NULL, TWAI_TASK_PRIO, NULL);
 	xSemaphoreTake(sync_task_sem, portMAX_DELAY);
+
+	xTaskCreate(twai_transmit_task, "TWAI_tx", TASK_STACK_SIZE, NULL, TWAI_TASK_PRIO, NULL);
+	xSemaphoreTake(sync_task_sem, portMAX_DELAY);
+
 	ESP_LOGI(TWAI_TAG, "Tasks started");
 }
 
 void twai_stop_task()
 {
-	if (twai_run_task) {
-		twai_run_task = false;
+	if (twai_allow_run_task()) {
+		twai_set_run_task(false);
 
-		xSemaphoreTake(twai_receive_task_mutex, portMAX_DELAY);
-		xSemaphoreGive(twai_receive_task_mutex);
+		tMUTEX(twai_receive_task_mutex);
+		rMUTEX(twai_receive_task_mutex);
 		
 		twai_message_t twai_tx_msg;
 		xQueueSend(can_send_queue, &twai_tx_msg, portMAX_DELAY);
-		xSemaphoreTake(twai_send_task_mutex, portMAX_DELAY);
-		xSemaphoreGive(twai_send_task_mutex);
+		tMUTEX(twai_send_task_mutex);
+		rMUTEX(twai_send_task_mutex);
+
+		tMUTEX(twai_alert_task_mutex);
+		rMUTEX(twai_alert_task_mutex);
 
 		ESP_LOGI(TWAI_TAG, "Tasks stopped");
 	}
@@ -125,48 +174,46 @@ void twai_stop_task()
 void twai_send_isotp_message(IsoTpLinkContainer* link, twai_message_t* msg)
 {
 	ESP_LOGD(TWAI_TAG, "twai_receive_task: link match");
-	ESP_LOGD(TWAI_TAG, "Taking isotp_mutex");
-	xSemaphoreTake(isotp_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
-	ESP_LOGD(TWAI_TAG, "Took isotp_mutex");
-	isotp_on_can_message(&link->link, msg->data, msg->data_length_code);
-	ESP_LOGD(TWAI_TAG, "twai_receive_task: giving isotp_mutex");
-	xSemaphoreGive(isotp_mutex);
+	tMUTEX(link->data_mutex);
+		isotp_on_can_message(&link->link, msg->data, msg->data_length_code);
+	rMUTEX(link->data_mutex);
+
 	ESP_LOGD(TWAI_TAG, "twai_receive_task: giving wait_for_isotp_data_sem");
 	xSemaphoreGive(link->wait_for_isotp_data_sem);
 }
 
 void twai_receive_task(void *arg)
 {
-	xSemaphoreTake(twai_receive_task_mutex, portMAX_DELAY);
-	ESP_LOGI(TWAI_TAG, "Receive task started");
-	xSemaphoreGive(sync_task_sem);
-	twai_message_t twai_rx_msg;
-    while (twai_run_task)
-	{
-		if (twai_receive(&twai_rx_msg, pdMS_TO_TICKS(TIMEOUT_NORMAL)) == ESP_OK) {
-			xSemaphoreTake(ch_can_timer_sem, 0);
-			ESP_LOGI(TWAI_TAG, "Received TWAI %08X and length %08X", twai_rx_msg.identifier, twai_rx_msg.data_length_code);
-			for (int i = 0; i < twai_rx_msg.data_length_code; i++) {
-				ESP_LOGD(TWAI_TAG, "RX Data: %02X", twai_rx_msg.data[i]);
-			}
-			IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[isotp_link_container_id];
-			if (twai_rx_msg.identifier == isotp_link_container->link.receive_arbitration_id) {
-				twai_send_isotp_message(isotp_link_container, &twai_rx_msg);
-			}
-			else {
-				for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++) {
-					isotp_link_container = &isotp_link_containers[i];
-					if (twai_rx_msg.identifier == isotp_link_container->link.receive_arbitration_id) {
-						twai_send_isotp_message(isotp_link_container, &twai_rx_msg);
-						break;
+	tMUTEX(twai_receive_task_mutex);
+		ESP_LOGI(TWAI_TAG, "Receive task started");
+		xSemaphoreGive(sync_task_sem);
+		twai_message_t twai_rx_msg;
+		while (twai_allow_run_task())
+		{
+			if (twai_receive(&twai_rx_msg, pdMS_TO_TICKS(TIMEOUT_LONG)) == ESP_OK) {
+				ESP_LOGD(TWAI_TAG, "Received TWAI %08X and length %08X", twai_rx_msg.identifier, twai_rx_msg.data_length_code);
+				xSemaphoreTake(ch_can_timer_sem, 0);
+		
+				if (twai_rx_msg.identifier < 0x500)
+					continue;
+
+				IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[isotp_link_container_id];
+				if (twai_rx_msg.identifier == isotp_link_container->link.receive_arbitration_id) {
+					twai_send_isotp_message(isotp_link_container, &twai_rx_msg);
+				} else {
+					for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++) {
+						isotp_link_container = &isotp_link_containers[i];
+						if (twai_rx_msg.identifier == isotp_link_container->link.receive_arbitration_id) {
+							twai_send_isotp_message(isotp_link_container, &twai_rx_msg);
+							break;
+						}
 					}
 				}
 			}
+			taskYIELD();
 		}
-		taskYIELD();
-    }
-	ESP_LOGI(TWAI_TAG, "Receive task stopped");
-	xSemaphoreGive(twai_receive_task_mutex);
+		ESP_LOGI(TWAI_TAG, "Receive task stopped");
+	rMUTEX(twai_receive_task_mutex);
     vTaskDelete(NULL);
 }
 
@@ -176,10 +223,13 @@ void twai_transmit_task(void *arg)
 	ESP_LOGI(TWAI_TAG, "Send task started");
 	xSemaphoreGive(sync_task_sem);
 	twai_message_t twai_tx_msg;
-    while (twai_run_task)
+    while (twai_allow_run_task())
     {
-		if (xQueueReceive(can_send_queue, &twai_tx_msg, portMAX_DELAY) == pdTRUE) {
-			if (twai_run_task) {
+		if (xQueueReceive(can_send_queue, &twai_tx_msg, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
+			if (twai_allow_run_task()) {
+				xSemaphoreTake(twai_bus_off_mutex, portMAX_DELAY);
+				xSemaphoreGive(twai_bus_off_mutex);
+
 				ESP_LOGD(TWAI_TAG, "Sending TWAI Message with ID %08X", twai_tx_msg.identifier);
 				for (int i = 0; i < twai_tx_msg.data_length_code; i++) {
 					ESP_LOGD(TWAI_TAG, "TX Data: %02X", twai_tx_msg.data[i]);
@@ -193,4 +243,40 @@ void twai_transmit_task(void *arg)
 	ESP_LOGI(TWAI_TAG, "Send task stopped");
 	xSemaphoreGive(twai_send_task_mutex);
     vTaskDelete(NULL);
+}
+
+void twai_alert_task(void* arg)
+{
+	xSemaphoreTake(twai_alert_task_mutex, portMAX_DELAY);
+	ESP_LOGI(TWAI_TAG, "Alert task started");
+	xSemaphoreGive(sync_task_sem);
+	uint32_t alerts;
+	while (twai_allow_run_task())
+	{
+		if (twai_read_alerts(&alerts, pdMS_TO_TICKS(TIMEOUT_LONG)) == ESP_OK) {
+			if (alerts & TWAI_ALERT_ABOVE_ERR_WARN) {
+				ESP_LOGI(TWAI_TAG, "Surpassed Error Warning Limit");
+			}
+			if (alerts & TWAI_ALERT_ERR_PASS) {
+				ESP_LOGI(TWAI_TAG, "Entered Error Passive state");
+			}
+			if (alerts & TWAI_ALERT_BUS_OFF) {
+				ESP_LOGI(TWAI_TAG, "Bus Off state");
+				if (xSemaphoreTake(twai_bus_off_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL)) == pdTRUE) {
+					ESP_LOGW(TWAI_TAG, "Initiate bus recovery");
+					vTaskDelay(pdMS_TO_TICKS(1000));
+					twai_initiate_recovery();    //Needs 128 occurrences of bus free signal
+					ESP_LOGI(TWAI_TAG, "Initiate bus recovery");
+				}
+			}
+			if (alerts & TWAI_ALERT_BUS_RECOVERED) {
+				xSemaphoreGive(twai_bus_off_mutex);
+				ESP_LOGI(TWAI_TAG, "Bus Recovered");
+			}
+		}
+		taskYIELD();
+	}
+	ESP_LOGI(TWAI_TAG, "Alert task stopped");
+	xSemaphoreGive(twai_alert_task_mutex);
+	vTaskDelete(NULL);
 }
