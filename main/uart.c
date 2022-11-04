@@ -4,14 +4,15 @@
 #include "freertos/semphr.h"
 #include "driver/uart.h"
 #include "esp_log.h"
-#include "mutexes.h"
 #include "queues.h"
 #include "constants.h"
 #include "ble_server.h"
+#include "connection_handler.h"
 #include "uart.h"
 
 #define UART_TAG 		"UART"
 
+static SemaphoreHandle_t	uart_buffer_mutex			= NULL;
 static SemaphoreHandle_t	uart_receive_task_mutex		= NULL;
 static SemaphoreHandle_t	uart_send_task_mutex		= NULL;
 static bool16				uart_run_task				= false;
@@ -27,8 +28,9 @@ static bool16 				uart_buffer_parse();
 static uint8_t 				uart_buffer_check_byte(uint16_t pos);
 static uint16_t				uart_buffer_check_word(uint16_t pos);
 
-void 		uart_send_task(void *arg);
-void 		uart_receive_task(void *arg);
+void	uart_buffer_clear_unsafe();
+void 	uart_send_task(void *arg);
+void 	uart_receive_task(void *arg);
 
 void uart_init()
 {
@@ -174,6 +176,13 @@ void uart_send_task(void *arg)
 
 void uart_buffer_clear()
 {
+	tMUTEX(uart_buffer_mutex);
+		uart_buffer_clear_unsafe();
+	rMUTEX(uart_buffer_mutex);
+}
+
+void uart_buffer_clear_unsafe()
+{
 	uart_packet_started	= false;
 	uart_buffer_length	= 0;
 	uart_buffer_pos 	= 0;
@@ -188,14 +197,14 @@ bool16 uart_buffer_check_header()
 				//check command length, fail if oversized
 				uint16_t packet_len = uart_buffer_check_word(6) + sizeof(ble_header_t);
 				if(packet_len > UART_BUFFER_SIZE) {
-					uart_buffer_clear();
+					uart_buffer_clear_unsafe();
 					return false;
 				}
 
 				return true;
 			}
 		} else {
-			uart_buffer_clear();
+			uart_buffer_clear_unsafe();
 			return false;
 		}
 	}
@@ -208,32 +217,34 @@ bool16 uart_buffer_add(uint8_t* tmp_buffer, uint16_t size)
 	bool16 		over_flow 	= false;
 	uint16_t	tmp_pos 	= 0;
 
-	//check for over flow of the buffer
-	if(size + uart_buffer_length > UART_BUFFER_SIZE) {
-		size = UART_BUFFER_SIZE - uart_buffer_length;
-		over_flow = true;
-	}
+	tMUTEX(uart_buffer_mutex);
+		//check for over flow of the buffer
+		if(size + uart_buffer_length > UART_BUFFER_SIZE) {
+			size = UART_BUFFER_SIZE - uart_buffer_length;
+			over_flow = true;
+		}
 
-	//check current write position (buffer pos + length) and if its beyond buffer length, wrap
-	uint16_t write_pos = uart_buffer_pos + uart_buffer_length;
-	if(write_pos >= UART_BUFFER_SIZE)
-		write_pos -= UART_BUFFER_SIZE;
+		//check current write position (buffer pos + length) and if its beyond buffer length, wrap
+		uint16_t write_pos = uart_buffer_pos + uart_buffer_length;
+		if(write_pos >= UART_BUFFER_SIZE)
+			write_pos -= UART_BUFFER_SIZE;
 
-	//if the size of the data extends beyond end of buffer, write partial
-	if(write_pos + size > UART_BUFFER_SIZE) {
-		uint16_t partial_size = UART_BUFFER_SIZE - write_pos;
-		memcpy(&uart_buffer[write_pos], tmp_buffer, partial_size);
-		size -= partial_size;
-		uart_buffer_length += partial_size;
-		tmp_pos = partial_size;
-		write_pos = 0;
-	}
+		//if the size of the data extends beyond end of buffer, write partial
+		if(write_pos + size > UART_BUFFER_SIZE) {
+			uint16_t partial_size = UART_BUFFER_SIZE - write_pos;
+			memcpy(&uart_buffer[write_pos], tmp_buffer, partial_size);
+			size -= partial_size;
+			uart_buffer_length += partial_size;
+			tmp_pos = partial_size;
+			write_pos = 0;
+		}
 
-	//write the remaining data to buffer
-	if(size) {
-		memcpy(&uart_buffer[write_pos], &tmp_buffer[tmp_pos], size);
-		uart_buffer_length += size;
-	}
+		//write the remaining data to buffer
+		if(size) {
+			memcpy(&uart_buffer[write_pos], &tmp_buffer[tmp_pos], size);
+			uart_buffer_length += size;
+		}
+	rMUTEX(uart_buffer_mutex);
 
 	return over_flow;
 }
@@ -295,7 +306,7 @@ bool16 uart_buffer_parse()
 		//if we are just starting a packet set our timeout
 		if(!uart_packet_started) {
 			uart_packet_started = true;
-			xSemaphoreTake(ch_uart_packet_timer_sem, 0);
+			ch_take_uart_packet_timer_sem();
 		}
 
 		//get packet length
@@ -317,7 +328,7 @@ bool16 uart_buffer_parse()
 				ESP_LOGD(UART_TAG, "uart_buffer_parse: malloc error size(%d)", packet_len);
 
 				//clear current buffer on malloc error
-				uart_buffer_clear();
+				uart_buffer_clear_unsafe();
 			}
 		}
 	}
@@ -335,58 +346,54 @@ void uart_receive_task(void *arg)
 	{
 		if(xQueueReceive(uart_receive_queue, &event, portMAX_DELAY) == pdTRUE) {
 			if (uart_run_task) {
-				xSemaphoreTake(uart_buffer_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
-				ESP_LOGI(UART_TAG, "uart[%d] event:", UART_PORT_NUM);
-				switch (event.type) {
-					//Event of UART receving data
-					/*We'd better handler data event fast, there would be much more data events than
-					other types of events. If we take too much time on data event, the queue might
-					be full.*/
-				case UART_DATA:
-					ESP_LOGI(UART_TAG, "[UART DATA]: %d", event.size);
-					uint8_t* tmp_buffer = malloc(event.size);
-					if (tmp_buffer) {
-						uart_read_bytes(UART_PORT_NUM, tmp_buffer, event.size, portMAX_DELAY);
-						uart_buffer_add(tmp_buffer, event.size);
-						free(tmp_buffer);
-						while (uart_buffer_parse());
+				tMUTEX(uart_buffer_mutex);
+					ESP_LOGI(UART_TAG, "uart[%d] event:", UART_PORT_NUM);
+					switch (event.type) {
+						case UART_DATA:
+							ESP_LOGI(UART_TAG, "[UART DATA]: %d", event.size);
+							uint8_t* tmp_buffer = malloc(event.size);
+							if (tmp_buffer) {
+								uart_read_bytes(UART_PORT_NUM, tmp_buffer, event.size, portMAX_DELAY);
+								uart_buffer_add(tmp_buffer, event.size);
+								free(tmp_buffer);
+								while (uart_buffer_parse());
+							}
+							else {
+								ESP_LOGD(UART_TAG, "uart_receive_task: malloc error size(%d)", event.size);
+							}
+							break;
+							//Event of HW FIFO overflow detected
+						case UART_FIFO_OVF:
+							ESP_LOGI(UART_TAG, "hw fifo overflow");
+							uart_buffer_clear_unsafe();
+							uart_flush_input(UART_PORT_NUM);
+							xQueueReset(uart_receive_queue);
+							break;
+							//Event of UART ring buffer full
+						case UART_BUFFER_FULL:
+							ESP_LOGI(UART_TAG, "ring buffer full");
+							uart_buffer_clear_unsafe();
+							uart_flush_input(UART_PORT_NUM);
+							xQueueReset(uart_receive_queue);
+							break;
+							//Event of UART RX break detected
+						case UART_BREAK:
+							ESP_LOGI(UART_TAG, "uart rx break");
+							break;
+							//Event of UART parity check error
+						case UART_PARITY_ERR:
+							ESP_LOGI(UART_TAG, "uart parity error");
+							break;
+							//Event of UART frame error
+						case UART_FRAME_ERR:
+							ESP_LOGI(UART_TAG, "uart frame error");
+							break;
+							//Others
+						default:
+							ESP_LOGI(UART_TAG, "uart event type: %d", event.type);
+							break;
 					}
-					else {
-						ESP_LOGD(UART_TAG, "uart_receive_task: malloc error size(%d)", event.size);
-					}
-					break;
-					//Event of HW FIFO overflow detected
-				case UART_FIFO_OVF:
-					ESP_LOGI(UART_TAG, "hw fifo overflow");
-					uart_buffer_clear();
-					uart_flush_input(UART_PORT_NUM);
-					xQueueReset(uart_receive_queue);
-					break;
-					//Event of UART ring buffer full
-				case UART_BUFFER_FULL:
-					ESP_LOGI(UART_TAG, "ring buffer full");
-					uart_buffer_clear();
-					uart_flush_input(UART_PORT_NUM);
-					xQueueReset(uart_receive_queue);
-					break;
-					//Event of UART RX break detected
-				case UART_BREAK:
-					ESP_LOGI(UART_TAG, "uart rx break");
-					break;
-					//Event of UART parity check error
-				case UART_PARITY_ERR:
-					ESP_LOGI(UART_TAG, "uart parity error");
-					break;
-					//Event of UART frame error
-				case UART_FRAME_ERR:
-					ESP_LOGI(UART_TAG, "uart frame error");
-					break;
-					//Others
-				default:
-					ESP_LOGI(UART_TAG, "uart event type: %d", event.type);
-					break;
-				}
-				xSemaphoreGive(uart_buffer_mutex);
+				rMUTEX(uart_buffer_mutex);
 			}
 		}
 		taskYIELD();

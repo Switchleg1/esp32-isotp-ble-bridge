@@ -5,7 +5,6 @@
 #include "driver/twai.h"
 #include "esp_log.h"
 #include "isotp.h"
-#include "mutexes.h"
 #include "queues.h"
 #include "constants.h"
 #include "ws2812_control.h"

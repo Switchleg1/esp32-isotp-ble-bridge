@@ -15,7 +15,6 @@
 #include "ble_server.h"
 #include "isotp_link_containers.h"
 #include "twai.h"
-#include "mutexes.h"
 #include "queues.h"
 #include "persist.h"
 #include "constants.h"
@@ -60,23 +59,6 @@ void isotp_user_debug(const char* message, ...) {
 }
 
 /* --------------------------- Functions --------------------------------- */
-
-bool16 setCpuFrequencyMhz(uint16_t max, uint16_t min)
-{
-#ifdef ALLOW_CPU_THROTTLE
-	//set config
-	esp_pm_config_esp32_t cpu_config;
-	cpu_config.max_freq_mhz = max;
-	cpu_config.min_freq_mhz = min;
-	cpu_config.light_sleep_enable = false;
-
-	//set cpu speed and return result
-	return esp_pm_configure(&cpu_config);
-#else
-	return true
-#endif
-}
-
 bool16 check_password(char* data)
 {
 	if(data) {
@@ -137,10 +119,6 @@ static void isotp_processing_task(void *arg)
         // poll
 		tMUTEX(isotp_link_container->data_mutex);
 			isotp_poll(link_ptr);
-        rMUTEX(isotp_link_container->data_mutex);
-
-        // receive
-		tMUTEX(isotp_link_container->data_mutex);
 			uint16_t out_size;
 			int ret = isotp_receive(link_ptr, payload_buf, isotp_link_container->buffer_size, &out_size);
         rMUTEX(isotp_link_container->data_mutex);
@@ -162,7 +140,11 @@ static void isotp_processing_task(void *arg)
 				send_packet(txID, rxID, 0, payload_buf, out_size);
 				persist_allow_send(number);
 			} else {
-				send_packet(link_ptr->receive_arbitration_id, link_ptr->send_arbitration_id, 0, payload_buf, out_size);
+				tMUTEX(isotp_link_container->data_mutex);
+					uint32_t txID = link_ptr->receive_arbitration_id;
+					uint32_t rxID = link_ptr->send_arbitration_id;
+				rMUTEX(isotp_link_container->data_mutex);
+				send_packet(txID, rxID, 0, payload_buf, out_size);
 			}
         }
 		taskYIELD(); // Allow higher priority tasks to run, for example Rx/Tx
@@ -466,7 +448,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 							ble_set_gap_name(str, true);
 							eeprom_write_str(BLE_GAP_KEY, str);
 							eeprom_commit();
-							xSemaphoreGive(ch_sleep_sem);
+							ch_give_sleep_sem();
 							return true;
 						}
 						break;
@@ -695,9 +677,6 @@ void bridge_connect()
 	//set to green
 	led_setcolor(LED_GREEN_QRT);
 
-	//set full speed
-	setCpuFrequencyMhz(240, 40);
-
 #ifdef PASSWORD_CHECK
 	//disable password support
 	passwordChecked = false;
@@ -711,9 +690,6 @@ void bridge_disconnect()
 
 	//set led to low red
 	led_setcolor(LED_RED_EHT);
-
-	//set slow speed
-	setCpuFrequencyMhz(80, 10);
 
 #ifdef PASSWORD_CHECK
 	//disable password support
@@ -745,13 +721,20 @@ void ble_notifications_disabled()
 
 void app_main(void)
 {
-	//set slow speed
-	setCpuFrequencyMhz(80, 10);
-
+	//create our sleep semaphore
 	sync_task_sem = xSemaphoreCreateBinary();
 
-	//start eeprom and read values
+	//init
 	eeprom_init();
+	ble_server_init();
+	ch_init();
+	led_init();
+	uart_init();
+	twai_init();
+	isotp_init();
+	persist_init();
+
+	//start eeprom and read values
 	char* gapName = eeprom_read_str(BLE_GAP_KEY);
 	if(gapName) {
 		ble_set_gap_name(gapName, false);
@@ -764,17 +747,9 @@ void app_main(void)
 		.notifications_subscribed = ble_notifications_enabled,
 		.notifications_unsubscribed = ble_notifications_disabled
     };
-	ble_server_setup(callbacks);
-
-	//init
-	ch_init();
-	led_init();
-	uart_init();
-	twai_init();
-	isotp_init();
-	persist_init();
 
 	//start tasks
+	ble_server_start(callbacks);
 	twai_start_task();
 	isotp_start_task();
 	persist_start_task();
@@ -782,7 +757,7 @@ void app_main(void)
 	ch_start_task();
 
 	//wait for sleep command
-	xSemaphoreTake(ch_sleep_sem, portMAX_DELAY);
+	ch_take_sleep_sem();
 
 	//stop ble connections
 	ble_stop_advertising();
@@ -794,6 +769,7 @@ void app_main(void)
 	persist_stop_task();
 	isotp_stop_task();
 	twai_stop_task();
+	ble_server_stop();
 
 	//deinit
 	persist_deinit();
@@ -802,7 +778,7 @@ void app_main(void)
 	uart_deinit();
 	led_deinit();
 	ch_deinit();
-	ble_server_shutdown();
+	ble_server_deinit();
 
 	//setup sleep timer
 	esp_sleep_enable_timer_wakeup(SLEEP_TIME * US_TO_S);

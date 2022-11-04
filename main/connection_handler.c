@@ -5,7 +5,6 @@
 #include "driver/twai.h"
 #include "esp_log.h"
 #include "isotp.h"
-#include "mutexes.h"
 #include "queues.h"
 #include "constants.h"
 #include "connection_handler.h"
@@ -15,6 +14,9 @@
 
 #define CH_TAG 			"Connection_handler"
 
+static SemaphoreHandle_t		ch_sleep_sem				= NULL;
+static SemaphoreHandle_t		ch_uart_packet_timer_sem	= NULL;
+static SemaphoreHandle_t		ch_can_timer_sem			= NULL;
 static SemaphoreHandle_t		ch_task_mutex				= NULL;
 static SemaphoreHandle_t		ch_settings_mutex			= NULL;
 static bool16					run_ch_task					= false;
@@ -128,6 +130,26 @@ bool16 ch_uart_connected()
 	return connection_timer;
 }
 
+bool16 ch_take_can_timer_sem()
+{
+	return xSemaphoreTake(ch_can_timer_sem, 0);
+}
+
+bool16 ch_take_uart_packet_timer_sem()
+{
+	return xSemaphoreTake(ch_uart_packet_timer_sem, 0);
+}
+
+void ch_take_sleep_sem()
+{
+	xSemaphoreTake(ch_sleep_sem, portMAX_DELAY);
+}
+
+void ch_give_sleep_sem()
+{
+	xSemaphoreGive(ch_sleep_sem);
+}
+
 bool16 ch_uart_connection_countdown()
 {
 	if(uart_connection_timer) {
@@ -154,21 +176,20 @@ void ch_task(void *arg)
 		}
 
 		//Did we receive a CAN or uart message?
-		if((!ble_connected() && !ch_uart_connection_countdown()) && !first_sleep_timer && xSemaphoreTake(ch_can_timer_sem, 0) == pdTRUE) {
+		if((!ble_connected() && !ch_uart_connection_countdown()) && !first_sleep_timer && ch_take_can_timer_sem() == pdTRUE) {
 			if (can_connection_timer) {
 				can_connection_timer--;
 			}
 #ifdef ALLOW_SLEEP
 			if(!can_connection_timer)
-				xSemaphoreGive(ch_sleep_sem);
+				ch_give_sleep_sem();
 #endif
 		} else {
 			can_connection_timer = TIMEOUT_CANCONNECTION;
 		}
 
 		//check for packet timeout
-		xSemaphoreTake(uart_buffer_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
-		if(ch_uart_connected() && xSemaphoreTake(ch_uart_packet_timer_sem, 0) == pdTRUE) {
+		if(ch_uart_connected() && ch_take_uart_packet_timer_sem() == pdTRUE) {
 			if (uart_packet_timer) {
 				uart_packet_timer--;
 			}
@@ -178,7 +199,6 @@ void ch_task(void *arg)
 		} else {
 			uart_packet_timer = TIMEOUT_UARTPACKET;
 		}
-		xSemaphoreGive(uart_buffer_mutex);
 
 		//give semaphores used for countdown timers
 		xSemaphoreGive(ch_can_timer_sem);

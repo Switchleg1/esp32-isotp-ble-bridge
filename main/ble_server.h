@@ -81,8 +81,10 @@ typedef struct
     void (*notifications_unsubscribed)();
 } ble_server_callbacks;
 
-void        ble_server_setup(ble_server_callbacks callbacks);
-void        ble_server_shutdown();
+void        ble_server_init();
+void        ble_server_deinit();
+void        ble_server_start(ble_server_callbacks callbacks);
+void        ble_server_stop();
 void        ble_send(uint32_t txID, uint32_t rxID, uint8_t flags, const void* src, size_t size);
 bool16      ble_connected();
 uint16_t    ble_queue_spaces();

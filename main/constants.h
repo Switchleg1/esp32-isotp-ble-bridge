@@ -4,8 +4,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-/* --------------------- Definitions and static variables ------------------ */
+//global semaphore to sync start/stop of tasks
+SemaphoreHandle_t						sync_task_sem;
 
+//defines
 typedef int16_t							bool16;
 #define tMUTEX(x)						xSemaphoreTake(x, portMAX_DELAY)
 #define rMUTEX(x)						xSemaphoreGive(x)
@@ -20,7 +22,7 @@ typedef int16_t							bool16;
 #define BRG_SETTING_PASSWORD			7
 #define BRG_SETTING_GAP					8
 
-#define TASK_STACK_SIZE					2048
+#define TASK_STACK_SIZE					3072 //2048
 
 #define TWAI_TASK_PRIO 			 		3 // Ensure we TX messages as quickly as we reasonably can to meet ISO15765-2 timing constraints
 #define ISOTP_TSK_PRIO 					2 // Run the message pump at a higher priority than the main queue/dequeue task when messages are available
@@ -46,7 +48,6 @@ typedef int16_t							bool16;
 #define TIMEOUT_UARTCONNECTION			120
 #define TIMEOUT_UARTPACKET				1
 
-#define ALLOW_CPU_THROTTLE
 #define ALLOW_SLEEP
 #define SLEEP_TIME						5
 #define US_TO_S							1000000
@@ -74,7 +75,7 @@ typedef int16_t							bool16;
 #define UART_RTS 						UART_PIN_NO_CHANGE
 #define UART_CTS 						UART_PIN_NO_CHANGE
 #define UART_PORT_NUM      				UART_NUM_0
-#define UART_BAUD_RATE     				250000 //115200
+#define UART_BAUD_RATE     				250000 //250000 //115200
 #define UART_BUFFER_SIZE				8192
 #define UART_INTERNAL_BUFFER_SIZE		2048
 //#define UART_ECHO

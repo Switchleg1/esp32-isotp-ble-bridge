@@ -640,17 +640,61 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
     } while (0);
 }
 
-void ble_server_setup(ble_server_callbacks callbacks)
+void ble_server_init()
 {
-    ble_server_shutdown();
+    ble_server_deinit();
 
-    ESP_LOGE(BLE_TAG, "Server starting");
+    //create mutexes and semaphores
+    ble_congested       = xSemaphoreCreateBinary();
+    ble_task_mutex      = xSemaphoreCreateMutex();
+    ble_settings_mutex  = xSemaphoreCreateMutex();
+    spp_send_queue      = xQueueCreate(BLE_QUEUE_SIZE, sizeof(send_message_t));
 
+    ESP_LOGI(BLE_TAG, "Init");
+}
+
+void ble_server_deinit()
+{
+    bool16 didDeInit = false;
+
+    if (spp_send_queue) {
+		vQueueDelete(spp_send_queue);
+		spp_send_queue = NULL;
+		didDeInit = true;
+	}
+
+	if (ble_congested) {
+		vSemaphoreDelete(ble_congested);
+		ble_congested = NULL;
+		didDeInit = true;
+	}
+
+	if (ble_task_mutex) {
+		vSemaphoreDelete(ble_task_mutex);
+		ble_task_mutex = NULL;
+		didDeInit = true;
+	}
+
+	if (ble_settings_mutex) {
+		vSemaphoreDelete(ble_settings_mutex);
+		ble_settings_mutex = NULL;
+		didDeInit = true;
+	}
+
+	if(didDeInit)
+		ESP_LOGI(BLE_TAG, "Deinit");
+}
+
+void ble_server_start(ble_server_callbacks callbacks)
+{
+    ble_server_stop();
+
+    ESP_LOGI(BLE_TAG, "Starting");
+
+    //initialize ble
     server_callbacks = callbacks;
     esp_err_t ret;
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-
-    ESP_LOGE(BLE_TAG, "Server starting1");
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
 
     ret = esp_bt_controller_init(&bt_cfg);
@@ -681,21 +725,17 @@ void ble_server_setup(ble_server_callbacks callbacks)
     esp_ble_gap_register_callback(gap_event_handler);
     esp_ble_gatts_app_register(ESP_SPP_APP_ID);
 
-    ble_congested       = xSemaphoreCreateBinary();
-    ble_task_mutex      = xSemaphoreCreateMutex();
-    ble_settings_mutex  = xSemaphoreCreateMutex();
-    spp_send_queue      = xQueueCreate(BLE_QUEUE_SIZE, sizeof(send_message_t));
-
+    //start send task
     ble_set_run_tasks(true);
     xTaskCreate(send_task, "BLE_sendTask", BLE_STACK_SIZE, NULL, BLE_TASK_PRIORITY, NULL);
 
-    ESP_LOGE(BLE_TAG, "Server setup successful");
+    ESP_LOGI(BLE_TAG, "Started");
 }
 
-void ble_server_shutdown()
+void ble_server_stop()
 {
     if (ble_allow_run_tasks()) {
-        ESP_LOGE(BLE_TAG, "Server shutting down");
+        ESP_LOGI(BLE_TAG, "Stopping");
 
         //set kill flag
         ble_set_run_tasks(false);
@@ -706,21 +746,17 @@ void ble_server_shutdown()
         xQueueSend(spp_send_queue, &msg, portMAX_DELAY);
         tMUTEX(ble_task_mutex);
         rMUTEX(ble_task_mutex);
-        vSemaphoreDelete(ble_task_mutex);
-        vSemaphoreDelete(ble_settings_mutex);
-        vSemaphoreDelete(ble_congested);
 
         //clear and delete queue
         while (xQueueReceive(spp_send_queue, &msg, 0) == pdTRUE)
             if(msg.buffer)
                 free(msg.buffer);
-        vQueueDelete(spp_send_queue);
 
         //shutdown BLE
         esp_bluedroid_disable();
         esp_bluedroid_deinit();
 
-        ESP_LOGE(BLE_TAG, "Server shutdown successful");
+        ESP_LOGI(BLE_TAG, "Stopped");
     }
 }
 

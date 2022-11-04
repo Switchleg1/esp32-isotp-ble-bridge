@@ -3,7 +3,6 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
-#include "mutexes.h"
 #include "queues.h"
 #include "ble_server.h"
 #include "constants.h"
@@ -22,7 +21,7 @@ typedef struct {
 	uint16_t			position;
 	uint16_t			rxID;
 	uint16_t			txID;
-	int64_t				last_packet;
+	uint32_t			next_packet;
 	SemaphoreHandle_t	data_mutex;
 	SemaphoreHandle_t	task_mutex;
 	SemaphoreHandle_t	send_sema;
@@ -64,7 +63,7 @@ void persist_init()
 		pPersist->number			= i;
 		pPersist->count				= 0;
 		pPersist->position			= 0;
-		pPersist->last_packet		= 0;
+		pPersist->next_packet		= 0;
 		pPersist->rxID				= isotp_link_containers[i].link.send_arbitration_id;
 		pPersist->txID				= isotp_link_containers[i].link.receive_arbitration_id;
 		pPersist->data_mutex		= xSemaphoreCreateMutex();
@@ -312,13 +311,26 @@ void persist_task(void *arg)
 		xSemaphoreGive(sync_task_sem);
 		while(persist_allow_run_task()) {
 			xSemaphoreTake(pPersist->send_sema, pdMS_TO_TICKS(TIMEOUT_NORMAL));
-			persist_send(pPersist);
-			int32_t required_delay = persist_get_delay() + (ble_queue_waiting() * persist_get_q_delay());
-			int64_t current_time = esp_timer_get_time();
-			int32_t current_delay = required_delay - ((current_time - pPersist->last_packet) / 1000);
-			if (current_delay < 0)
-				current_delay = 0;
-			pPersist->last_packet = current_time;
+			uint32_t current_delay = 1;
+			uint32_t required_delay = persist_get_delay() + (ble_queue_waiting() * persist_get_q_delay());
+			uint32_t current_time = (esp_timer_get_time() / 1000UL) & 0xFFFFFFFF;
+			if(persist_send(pPersist)) {
+				tMUTEX(pPersist->data_mutex);
+					pPersist->next_packet += required_delay;
+					if(pPersist->next_packet <= current_time) {
+						pPersist->next_packet = current_time + 1;
+					} else {
+						current_delay = pPersist->next_packet - current_time;
+						if(current_delay > required_delay) {
+							current_delay			= required_delay;
+							pPersist->next_packet	= current_time + required_delay;
+						}
+					}
+				rMUTEX(pPersist->data_mutex);
+			} else {
+				current_delay			= required_delay;
+				pPersist->next_packet	= current_time + required_delay;
+			}
 			vTaskDelay(pdMS_TO_TICKS(current_delay));
 		}
 		tMUTEX(pPersist->data_mutex);

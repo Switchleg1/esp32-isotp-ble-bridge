@@ -5,11 +5,11 @@
 #include "driver/twai.h"
 #include "esp_log.h"
 #include "isotp.h"
-#include "mutexes.h"
 #include "queues.h"
 #include "isotp_link_containers.h"
 #include "driver/twai.h"
 #include "constants.h"
+#include "connection_handler.h"
 #include "twai.h"
 
 #define TWAI_TAG 		"TWAI"
@@ -59,6 +59,14 @@ void twai_init()
 {
 	twai_deinit();
 
+	//init mutexes
+	twai_receive_task_mutex = xSemaphoreCreateMutex();
+	twai_send_task_mutex	= xSemaphoreCreateMutex();
+	twai_alert_task_mutex	= xSemaphoreCreateMutex();
+	twai_bus_off_mutex		= xSemaphoreCreateMutex();
+	twai_settings_mutex		= xSemaphoreCreateMutex();
+	can_send_queue			= xQueueCreate(CAN_QUEUE_SIZE, sizeof(twai_message_t));
+
 	// Need to pull down GPIO 21 to unset the "S" (Silent Mode) pin on CAN Xceiver.
     gpio_config_t io_conf;
     io_conf.intr_type = GPIO_INTR_DISABLE;
@@ -69,27 +77,12 @@ void twai_init()
     gpio_config(&io_conf);
 	gpio_set_level(SILENT_GPIO_NUM, 0);
 
-	// "TWAI" is knockoff CAN. Install TWAI driver.
-    ESP_ERROR_CHECK(twai_driver_install(&g_config, &t_config, &f_config));
-	ESP_LOGI(TWAI_TAG, "CAN/TWAI Driver installed");
-	ESP_ERROR_CHECK(twai_start());
-	ESP_LOGI(TWAI_TAG, "CAN/TWAI Driver started");
-
-	twai_receive_task_mutex = xSemaphoreCreateMutex();
-	twai_send_task_mutex	= xSemaphoreCreateMutex();
-	twai_alert_task_mutex	= xSemaphoreCreateMutex();
-	twai_bus_off_mutex		= xSemaphoreCreateMutex();
-	twai_settings_mutex		= xSemaphoreCreateMutex();
-	can_send_queue			= xQueueCreate(CAN_QUEUE_SIZE, sizeof(twai_message_t));
-
 	ESP_LOGI(TWAI_TAG, "Init");
 }
 
 void twai_deinit()
 {
 	bool16 didDeInit = false;
-
-	twai_driver_uninstall();
 
 	if (can_send_queue) {
 		vQueueDelete(can_send_queue);
@@ -134,6 +127,13 @@ void twai_deinit()
 void twai_start_task()
 {
 	twai_stop_task();
+
+	// "TWAI" is knockoff CAN. Install TWAI driver.
+    ESP_ERROR_CHECK(twai_driver_install(&g_config, &t_config, &f_config));
+	ESP_LOGI(TWAI_TAG, "Driver installed");
+	ESP_ERROR_CHECK(twai_start());
+	ESP_LOGI(TWAI_TAG, "Driver started");
+
 	twai_set_run_task(true);
 
 	ESP_LOGI(TWAI_TAG, "Tasks starting");
@@ -168,6 +168,10 @@ void twai_stop_task()
 		rMUTEX(twai_alert_task_mutex);
 
 		ESP_LOGI(TWAI_TAG, "Tasks stopped");
+
+		twai_driver_uninstall();
+
+		ESP_LOGI(TWAI_TAG, "Driver uninstalled");
 	}
 }
 
@@ -192,7 +196,7 @@ void twai_receive_task(void *arg)
 		{
 			if (twai_receive(&twai_rx_msg, pdMS_TO_TICKS(TIMEOUT_LONG)) == ESP_OK) {
 				ESP_LOGD(TWAI_TAG, "Received TWAI %08X and length %08X", twai_rx_msg.identifier, twai_rx_msg.data_length_code);
-				xSemaphoreTake(ch_can_timer_sem, 0);
+				ch_take_can_timer_sem();
 		
 				if (twai_rx_msg.identifier < 0x500)
 					continue;
