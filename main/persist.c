@@ -242,18 +242,14 @@ bool16 persist_send(persist_t* pPersist)
 	tMUTEX(pPersist->data_mutex);
 		//If persist mode is disabled abort
 		if (!persist_enabled() || !pPersist->count)
-		{
-			rMUTEX(pPersist->data_mutex);
-			return false;
-		}
+			goto return_false;
 
 		//don't flood the queues
-		if (uxQueueMessagesWaiting(isotp_send_message_queue) || !ble_queue_spaces())
+		if (!uxQueueSpacesAvailable(isotp_send_message_queue) || !ble_queue_spaces())
 		{
 			ESP_LOGW(PERSIST_TAG, "Unable to send message: queues are full");
-			rMUTEX(pPersist->data_mutex);
 			xSemaphoreGive(pPersist->send_sema);
-			return false;
+			goto return_false;
 		}
 
 		//Cycle through messages
@@ -266,9 +262,8 @@ bool16 persist_send(persist_t* pPersist)
 		if (pMsg->msg_length == 0)
 		{
 			ESP_LOGW(PERSIST_TAG, "Unable to send message: message length 0");
-			rMUTEX(pPersist->data_mutex);
 			xSemaphoreGive(pPersist->send_sema);
-			return false;
+			goto return_false;
 		}
 
 		//We are good, lets send the message!
@@ -276,9 +271,8 @@ bool16 persist_send(persist_t* pPersist)
 		msg.buffer = malloc(pMsg->msg_length);
 		if (msg.buffer == NULL) {
 			ESP_LOGW(PERSIST_TAG, "Unable to send message: malloc error %s %d", __func__, __LINE__);
-			rMUTEX(pPersist->data_mutex);
 			xSemaphoreGive(pPersist->send_sema);
-			return false;
+			goto return_false;
 		}
 
 		//copy persist message into a new container
@@ -299,6 +293,10 @@ bool16 persist_send(persist_t* pPersist)
 	}
 
 	return true;
+
+return_false:
+	rMUTEX(pPersist->data_mutex);
+	return false;
 }
 
 void persist_task(void *arg)
@@ -328,8 +326,10 @@ void persist_task(void *arg)
 					}
 				rMUTEX(pPersist->data_mutex);
 			} else {
-				current_delay			= required_delay;
-				pPersist->next_packet	= current_time + required_delay;
+				current_delay = required_delay;
+				tMUTEX(pPersist->data_mutex);
+					pPersist->next_packet = current_time + required_delay;
+				rMUTEX(pPersist->data_mutex);
 			}
 			vTaskDelay(pdMS_TO_TICKS(current_delay));
 		}

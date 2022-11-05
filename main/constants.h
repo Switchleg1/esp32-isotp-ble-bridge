@@ -49,6 +49,7 @@ typedef int16_t							bool16;
 #define TIMEOUT_UARTPACKET				1
 
 #define ALLOW_SLEEP
+#define RESET_ON_DISCONNECT
 #define SLEEP_TIME						5
 #define US_TO_S							1000000
 
