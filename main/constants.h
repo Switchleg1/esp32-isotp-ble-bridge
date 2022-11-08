@@ -71,6 +71,7 @@ typedef int16_t							bool16;
 #define CAN_CLK_DIVIDER					0
 #define CAN_TIMING						TWAI_TIMING_CONFIG_500KBITS()
 #define CAN_FILTER						TWAI_FILTER_CONFIG_ACCEPT_ALL()
+#define ISOTP_STMIN						1000
 
 #define UART_TXD 						UART_PIN_NO_CHANGE
 #define UART_RXD 						UART_PIN_NO_CHANGE

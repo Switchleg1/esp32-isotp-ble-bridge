@@ -373,7 +373,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 		{
 			//Are we setting or getting?
 			if(header->cmdFlags & BLE_COMMAND_FLAG_SETTINGS_GET)
-			{   //Make sure payload is empty
+			{   //client is requesting info, make sure payload is empty
 				if(header->cmdSize == 0)
 				{
 					//send requested information
@@ -439,7 +439,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 					}
 					return true;
 				}
-			} else { //Setting
+			} else { // set a setting
 				switch(header->cmdFlags ^ BLE_COMMAND_FLAG_SETTINGS)
 				{
 					case BRG_SETTING_ISOTP_STMIN:
@@ -448,15 +448,21 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 						{   //match rx/tx
 							for(uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++)
 							{
+								bool16 link_found = false;
 								IsoTpLinkContainer *isotp_link_container = &isotp_link_containers[i];
-								if(header->rxID == isotp_link_container->link.receive_arbitration_id &&
-									header->txID == isotp_link_container->link.send_arbitration_id)
-								{
-									uint16_t* stmin = (uint16_t*)data;
-									isotp_link_container->link.stmin_override = *stmin;
-									ESP_LOGI(BRIDGE_TAG, "Set stmin [%04X] on container [%02X]", *stmin, i);
+								tMUTEX(isotp_link_container->data_mutex);
+									if(header->rxID == isotp_link_container->link.receive_arbitration_id &&
+										header->txID == isotp_link_container->link.send_arbitration_id)
+									{
+										uint16_t* stmin = (uint16_t*)data;
+										isotp_link_container->link.stmin_override = *stmin;
+										ESP_LOGI(BRIDGE_TAG, "Set stmin [%04X] on container [%02X]", *stmin, i);
+										link_found = true;
+									}
+								rMUTEX(isotp_link_container->data_mutex);
+
+								if(link_found)
 									return true;
-								}
 							}
 						}
 						break;
