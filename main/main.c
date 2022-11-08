@@ -33,7 +33,7 @@ void app_main(void)
 
 #if !CONFIG_ESP_TASK_WDT_INIT
     // If the WDT was not initialized automatically on startup, manually intialize it now
-    ESP_ERROR_CHECK(esp_task_wdt_init(WDT_TIMEOUT_MS, true));
+    ESP_ERROR_CHECK(esp_task_wdt_init(WDT_TIMEOUT_S, true));
     ESP_LOGI(MAIN_TAG, "WDT initialized");
 #endif
 

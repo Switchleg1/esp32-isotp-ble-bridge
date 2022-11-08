@@ -147,39 +147,39 @@ static void isotp_processing_task(void *arg)
 		while (isotp_allow_run_tasks())
 		{
 			if (link_ptr->send_status != ISOTP_SEND_STATUS_INPROGRESS &&
-				link_ptr->receive_status != ISOTP_RECEIVE_STATUS_INPROGRESS &&
-				xSemaphoreTake(isotp_link_container->wait_for_isotp_data_sem, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE)
-			{
-				// poll
-				tMUTEX(isotp_link_container->data_mutex);
-					isotp_poll(link_ptr);
-					uint16_t out_size;
-					int ret = isotp_receive(link_ptr, payload_buf, isotp_link_container->buffer_size, &out_size);
-				rMUTEX(isotp_link_container->data_mutex);
+				link_ptr->receive_status != ISOTP_RECEIVE_STATUS_INPROGRESS) {
+				xSemaphoreTake(isotp_link_container->wait_for_isotp_data_sem, pdMS_TO_TICKS(TIMEOUT_LONG));
+			}
+			
+			// poll
+			tMUTEX(isotp_link_container->data_mutex);
+				isotp_poll(link_ptr);
+				uint16_t out_size;
+				int ret = isotp_receive(link_ptr, payload_buf, isotp_link_container->buffer_size, &out_size);
+			rMUTEX(isotp_link_container->data_mutex);
 
-				// if it is time to send fully received + parsed ISO-TP data over BLE and/or websocket
-				if (ret == ISOTP_RET_OK) {
-					ESP_LOGI(BRIDGE_TAG, "Received ISO-TP message with length: %04X", out_size);
-					for (int i = 0; i < out_size; i++) {
-						ESP_LOGD(BRIDGE_TAG, "payload_buf[%d] = %02x", i, payload_buf[i]);
-					}
+			// if it is time to send fully received + parsed ISO-TP data over BLE and/or websocket
+			if (ret == ISOTP_RET_OK) {
+				ESP_LOGI(BRIDGE_TAG, "Received ISO-TP message with length: %04X", out_size);
+				for (int i = 0; i < out_size; i++) {
+					ESP_LOGD(BRIDGE_TAG, "payload_buf[%d] = %02x", i, payload_buf[i]);
+				}
 
-					//Are we in persist mode?
-					if(number < PERSIST_COUNT && persist_enabled())
-					{
-						//send time stamp instead of rx/tx
-						uint32_t time = (esp_timer_get_time() / 1000UL) & 0xFFFFFFFF;
-						uint16_t rxID = (time >> 16) & 0xFFFF;
-						uint16_t txID = time & 0xFFFF;
-						send_packet(txID, rxID, 0, payload_buf, out_size);
-						persist_allow_send(number);
-					} else {
-						tMUTEX(isotp_link_container->data_mutex);
-							uint32_t txID = link_ptr->receive_arbitration_id;
-							uint32_t rxID = link_ptr->send_arbitration_id;
-						rMUTEX(isotp_link_container->data_mutex);
-						send_packet(txID, rxID, 0, payload_buf, out_size);
-					}
+				//Are we in persist mode?
+				if(number < PERSIST_COUNT && persist_enabled())
+				{
+					//send time stamp instead of rx/tx
+					uint32_t time = (esp_timer_get_time() / 1000UL) & 0xFFFFFFFF;
+					uint16_t rxID = (time >> 16) & 0xFFFF;
+					uint16_t txID = time & 0xFFFF;
+					send_packet(txID, rxID, 0, payload_buf, out_size);
+					persist_allow_send(number);
+				} else {
+					tMUTEX(isotp_link_container->data_mutex);
+						uint32_t txID = link_ptr->receive_arbitration_id;
+						uint32_t rxID = link_ptr->send_arbitration_id;
+					rMUTEX(isotp_link_container->data_mutex);
+					send_packet(txID, rxID, 0, payload_buf, out_size);
 				}
 			}
 
