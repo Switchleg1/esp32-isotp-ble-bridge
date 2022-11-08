@@ -10,6 +10,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "soc/dport_reg.h"
 #include "isotp.h"
 #include "ble_server.h"
@@ -29,6 +30,16 @@
 void app_main(void)
 {
 	ESP_LOGI(MAIN_TAG, "Application starting");
+
+#if !CONFIG_ESP_TASK_WDT_INIT
+    // If the WDT was not initialized automatically on startup, manually intialize it now
+    ESP_ERROR_CHECK(esp_task_wdt_init(WDT_TIMEOUT_MS, true));
+    ESP_LOGI(MAIN_TAG, "WDT initialized");
+#endif
+
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
 
 	//create our sleep semaphore
 	sync_task_sem = xSemaphoreCreateBinary();
@@ -66,11 +77,15 @@ void app_main(void)
 	ch_start_task();
 
 	//wait for sleep command
-	ch_take_sleep_sem();
+	while(ch_take_sleep_sem() != pdTRUE)
+		esp_task_wdt_reset();
 
 	//stop ble connections
 	ble_stop_advertising();
-	while (ble_connected());
+	while (ble_connected()) {
+		vTaskDelay(pdMS_TO_TICKS(TIMEOUT_NORMAL));
+		esp_task_wdt_reset();
+	}
 	
 	//stop tasks
 	ch_stop_task();
@@ -92,6 +107,9 @@ void app_main(void)
 	//setup sleep timer
 	esp_sleep_enable_timer_wakeup(SLEEP_TIME * US_TO_S);
 	ESP_LOGI(MAIN_TAG, "Timeout - Sleeping [%ds]", SLEEP_TIME);
+
+	//unsubscribe to WDT and deinit
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
 
 	//Go to sleep now
 	esp_deep_sleep_start();

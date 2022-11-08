@@ -4,6 +4,8 @@
 #include "freertos/semphr.h"
 #include "driver/twai.h"
 #include "esp_log.h"
+#include "esp_err.h"
+#include "esp_task_wdt.h"
 #include "isotp.h"
 #include "queues.h"
 #include "isotp_link_containers.h"
@@ -188,6 +190,10 @@ void twai_send_isotp_message(IsoTpLinkContainer* link, twai_message_t* msg)
 
 void twai_receive_task(void *arg)
 {
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
+
 	tMUTEX(twai_receive_task_mutex);
 		ESP_LOGI(TWAI_TAG, "Receive task started");
 		xSemaphoreGive(sync_task_sem);
@@ -198,9 +204,11 @@ void twai_receive_task(void *arg)
 				ESP_LOGD(TWAI_TAG, "Received TWAI %08X and length %08X", twai_rx_msg.identifier, twai_rx_msg.data_length_code);
 				ch_take_can_timer_sem();
 		
-				if (twai_rx_msg.identifier < 0x500)
+				if (twai_rx_msg.identifier < 0x500) {
+					esp_task_wdt_reset();
 					continue;
-
+				}
+				
 				IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[isotp_link_container_id];
 				if (twai_rx_msg.identifier == isotp_link_container->link.receive_arbitration_id) {
 					twai_send_isotp_message(isotp_link_container, &twai_rx_msg);
@@ -214,73 +222,99 @@ void twai_receive_task(void *arg)
 					}
 				}
 			}
+
+			//reset the WDT and yield to tasks
+			esp_task_wdt_reset();
 			taskYIELD();
 		}
 		ESP_LOGI(TWAI_TAG, "Receive task stopped");
 	rMUTEX(twai_receive_task_mutex);
+
+	//unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
 }
 
 void twai_transmit_task(void *arg)
 {
-	xSemaphoreTake(twai_send_task_mutex, portMAX_DELAY);
-	ESP_LOGI(TWAI_TAG, "Send task started");
-	xSemaphoreGive(sync_task_sem);
-	twai_message_t twai_tx_msg;
-    while (twai_allow_run_task())
-    {
-		if (xQueueReceive(can_send_queue, &twai_tx_msg, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
-			if (twai_allow_run_task()) {
-				xSemaphoreTake(twai_bus_off_mutex, portMAX_DELAY);
-				xSemaphoreGive(twai_bus_off_mutex);
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
 
-				ESP_LOGD(TWAI_TAG, "Sending TWAI Message with ID %08X", twai_tx_msg.identifier);
-				for (int i = 0; i < twai_tx_msg.data_length_code; i++) {
-					ESP_LOGD(TWAI_TAG, "TX Data: %02X", twai_tx_msg.data[i]);
+	tMUTEX(twai_send_task_mutex);
+		ESP_LOGI(TWAI_TAG, "Send task started");
+		xSemaphoreGive(sync_task_sem);
+		twai_message_t twai_tx_msg;
+		while (twai_allow_run_task())
+		{
+			if (xQueueReceive(can_send_queue, &twai_tx_msg, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
+				if (twai_allow_run_task()) {
+					xSemaphoreTake(twai_bus_off_mutex, portMAX_DELAY);
+					xSemaphoreGive(twai_bus_off_mutex);
+
+					ESP_LOGD(TWAI_TAG, "Sending TWAI Message with ID %08X", twai_tx_msg.identifier);
+					for (int i = 0; i < twai_tx_msg.data_length_code; i++) {
+						ESP_LOGD(TWAI_TAG, "TX Data: %02X", twai_tx_msg.data[i]);
+					}
+					twai_transmit(&twai_tx_msg, portMAX_DELAY);
+					ESP_LOGD(TWAI_TAG, "Sent TWAI Message with ID %08X", twai_tx_msg.identifier);
 				}
-				twai_transmit(&twai_tx_msg, portMAX_DELAY);
-				ESP_LOGD(TWAI_TAG, "Sent TWAI Message with ID %08X", twai_tx_msg.identifier);
 			}
+
+			//reset the WDT and yield to tasks
+			esp_task_wdt_reset();
+			taskYIELD();
 		}
-		taskYIELD();
-    }
-	ESP_LOGI(TWAI_TAG, "Send task stopped");
-	xSemaphoreGive(twai_send_task_mutex);
+		ESP_LOGI(TWAI_TAG, "Send task stopped");
+	rMUTEX(twai_send_task_mutex);
+
+	//unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
 }
 
 void twai_alert_task(void* arg)
 {
-	xSemaphoreTake(twai_alert_task_mutex, portMAX_DELAY);
-	ESP_LOGI(TWAI_TAG, "Alert task started");
-	xSemaphoreGive(sync_task_sem);
-	uint32_t alerts;
-	while (twai_allow_run_task())
-	{
-		if (twai_read_alerts(&alerts, pdMS_TO_TICKS(TIMEOUT_LONG)) == ESP_OK) {
-			if (alerts & TWAI_ALERT_ABOVE_ERR_WARN) {
-				ESP_LOGI(TWAI_TAG, "Surpassed Error Warning Limit");
-			}
-			if (alerts & TWAI_ALERT_ERR_PASS) {
-				ESP_LOGI(TWAI_TAG, "Entered Error Passive state");
-			}
-			if (alerts & TWAI_ALERT_BUS_OFF) {
-				ESP_LOGI(TWAI_TAG, "Bus Off state");
-				if (xSemaphoreTake(twai_bus_off_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL)) == pdTRUE) {
-					ESP_LOGW(TWAI_TAG, "Initiate bus recovery");
-					vTaskDelay(pdMS_TO_TICKS(1000));
-					twai_initiate_recovery();    //Needs 128 occurrences of bus free signal
-					ESP_LOGI(TWAI_TAG, "Initiate bus recovery");
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
+
+	tMUTEX(twai_alert_task_mutex);
+		ESP_LOGI(TWAI_TAG, "Alert task started");
+		xSemaphoreGive(sync_task_sem);
+		uint32_t alerts;
+		while (twai_allow_run_task())
+		{
+			if (twai_read_alerts(&alerts, pdMS_TO_TICKS(TIMEOUT_LONG)) == ESP_OK) {
+				if (alerts & TWAI_ALERT_ABOVE_ERR_WARN) {
+					ESP_LOGI(TWAI_TAG, "Surpassed Error Warning Limit");
+				}
+				if (alerts & TWAI_ALERT_ERR_PASS) {
+					ESP_LOGI(TWAI_TAG, "Entered Error Passive state");
+				}
+				if (alerts & TWAI_ALERT_BUS_OFF) {
+					ESP_LOGI(TWAI_TAG, "Bus Off state");
+					if (xSemaphoreTake(twai_bus_off_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL)) == pdTRUE) {
+						ESP_LOGW(TWAI_TAG, "Initiate bus recovery");
+						vTaskDelay(pdMS_TO_TICKS(1000));
+						twai_initiate_recovery();    //Needs 128 occurrences of bus free signal
+						ESP_LOGI(TWAI_TAG, "Initiate bus recovery");
+					}
+				}
+				if (alerts & TWAI_ALERT_BUS_RECOVERED) {
+					xSemaphoreGive(twai_bus_off_mutex);
+					ESP_LOGI(TWAI_TAG, "Bus Recovered");
 				}
 			}
-			if (alerts & TWAI_ALERT_BUS_RECOVERED) {
-				xSemaphoreGive(twai_bus_off_mutex);
-				ESP_LOGI(TWAI_TAG, "Bus Recovered");
-			}
+
+			//reset the WDT and yield to tasks
+			esp_task_wdt_reset();
+			taskYIELD();
 		}
-		taskYIELD();
-	}
-	ESP_LOGI(TWAI_TAG, "Alert task stopped");
-	xSemaphoreGive(twai_alert_task_mutex);
+		ESP_LOGI(TWAI_TAG, "Alert task stopped");
+	rMUTEX(twai_alert_task_mutex);
+
+	//unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
 	vTaskDelete(NULL);
 }

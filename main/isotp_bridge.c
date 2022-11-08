@@ -8,6 +8,7 @@
 #include "esp_pm.h"
 #include "esp_sleep.h"
 #include "esp_err.h"
+#include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "soc/dport_reg.h"
@@ -131,62 +132,75 @@ void send_packet(uint32_t txID, uint32_t rxID, uint8_t flags, const void* src, s
 
 static void isotp_processing_task(void *arg)
 {
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
+
     IsoTpLinkContainer *isotp_link_container = (IsoTpLinkContainer*)arg;
     IsoTpLink *link_ptr = &isotp_link_container->link;
 	uint8_t *payload_buf = isotp_link_container->payload_buf;
 	uint16_t number = isotp_link_container->number;
 
-	xSemaphoreTake(isotp_link_container->task_mutex, portMAX_DELAY);
-	ESP_LOGI(BRIDGE_TAG, "Receive task started: %d", number);
-	xSemaphoreGive(sync_task_sem);
-    while (isotp_allow_run_tasks())
-    {
-        if (link_ptr->send_status != ISOTP_SEND_STATUS_INPROGRESS &&
-            link_ptr->receive_status != ISOTP_RECEIVE_STATUS_INPROGRESS)
-        {
-            // Link is idle, wait for new data before pumping loop.
-			xSemaphoreTake(isotp_link_container->wait_for_isotp_data_sem, portMAX_DELAY);
-		}
-        // poll
-		tMUTEX(isotp_link_container->data_mutex);
-			isotp_poll(link_ptr);
-			uint16_t out_size;
-			int ret = isotp_receive(link_ptr, payload_buf, isotp_link_container->buffer_size, &out_size);
-        rMUTEX(isotp_link_container->data_mutex);
-
-        // if it is time to send fully received + parsed ISO-TP data over BLE and/or websocket
-        if (ISOTP_RET_OK == ret) {
-			ESP_LOGI(BRIDGE_TAG, "Received ISO-TP message with length: %04X", out_size);
-            for (int i = 0; i < out_size; i++) {
-				ESP_LOGD(BRIDGE_TAG, "payload_buf[%d] = %02x", i, payload_buf[i]);
-			}
-
-			//Are we in persist mode?
-			if(number < PERSIST_COUNT && persist_enabled())
+	tMUTEX(isotp_link_container->task_mutex);
+		ESP_LOGI(BRIDGE_TAG, "Receive task started: %d", number);
+		xSemaphoreGive(sync_task_sem);
+		while (isotp_allow_run_tasks())
+		{
+			if (link_ptr->send_status != ISOTP_SEND_STATUS_INPROGRESS &&
+				link_ptr->receive_status != ISOTP_RECEIVE_STATUS_INPROGRESS &&
+				xSemaphoreTake(isotp_link_container->wait_for_isotp_data_sem, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE)
 			{
-				//send time stamp instead of rx/tx
-				uint32_t time = (esp_timer_get_time() / 1000UL) & 0xFFFFFFFF;
-				uint16_t rxID = (time >> 16) & 0xFFFF;
-				uint16_t txID = time & 0xFFFF;
-				send_packet(txID, rxID, 0, payload_buf, out_size);
-				persist_allow_send(number);
-			} else {
+				// poll
 				tMUTEX(isotp_link_container->data_mutex);
-					uint32_t txID = link_ptr->receive_arbitration_id;
-					uint32_t rxID = link_ptr->send_arbitration_id;
+					isotp_poll(link_ptr);
+					uint16_t out_size;
+					int ret = isotp_receive(link_ptr, payload_buf, isotp_link_container->buffer_size, &out_size);
 				rMUTEX(isotp_link_container->data_mutex);
-				send_packet(txID, rxID, 0, payload_buf, out_size);
+
+				// if it is time to send fully received + parsed ISO-TP data over BLE and/or websocket
+				if (ret == ISOTP_RET_OK) {
+					ESP_LOGI(BRIDGE_TAG, "Received ISO-TP message with length: %04X", out_size);
+					for (int i = 0; i < out_size; i++) {
+						ESP_LOGD(BRIDGE_TAG, "payload_buf[%d] = %02x", i, payload_buf[i]);
+					}
+
+					//Are we in persist mode?
+					if(number < PERSIST_COUNT && persist_enabled())
+					{
+						//send time stamp instead of rx/tx
+						uint32_t time = (esp_timer_get_time() / 1000UL) & 0xFFFFFFFF;
+						uint16_t rxID = (time >> 16) & 0xFFFF;
+						uint16_t txID = time & 0xFFFF;
+						send_packet(txID, rxID, 0, payload_buf, out_size);
+						persist_allow_send(number);
+					} else {
+						tMUTEX(isotp_link_container->data_mutex);
+							uint32_t txID = link_ptr->receive_arbitration_id;
+							uint32_t rxID = link_ptr->send_arbitration_id;
+						rMUTEX(isotp_link_container->data_mutex);
+						send_packet(txID, rxID, 0, payload_buf, out_size);
+					}
+				}
 			}
-        }
-		taskYIELD(); // Allow higher priority tasks to run, for example Rx/Tx
-    }
-	ESP_LOGI(BRIDGE_TAG, "Receive task stopped: %d", number);
-	xSemaphoreGive(isotp_link_container->task_mutex);
+
+			//reset the WDT and yield to tasks
+			esp_task_wdt_reset();
+			taskYIELD();
+		}
+		ESP_LOGI(BRIDGE_TAG, "Receive task stopped: %d", number);
+	rMUTEX(isotp_link_container->task_mutex);
+
+	//unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
 }
 
 static void isotp_send_queue_task(void *arg)
 {
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
+
 	tMUTEX(isotp_send_task_mutex);
 		ESP_LOGI(BRIDGE_TAG, "Send task started");
 		xSemaphoreGive(sync_task_sem);
@@ -196,69 +210,49 @@ static void isotp_send_queue_task(void *arg)
 				if (isotp_allow_run_tasks()) {
 					ESP_LOGD(BRIDGE_TAG, "isotp_send_queue_task: sending message with %d size (rx id: %04x / tx id: %04x)", msg.msg_length, msg.rxID, msg.txID);
 					for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++) {
+						bool16 found_container = false;
 						IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[i];
 						tMUTEX(isotp_link_container->data_mutex);
-						if (msg.txID == isotp_link_container->link.receive_arbitration_id &&
-							msg.rxID == isotp_link_container->link.send_arbitration_id) {
-							ESP_LOGD(BRIDGE_TAG, "container match [%d]", i);
-							isotp_link_container_id = i;
-							isotp_send(&isotp_link_container->link, msg.buffer, msg.msg_length);
-							xSemaphoreGive(isotp_link_container->wait_for_isotp_data_sem);
-							break;
-						}
+							if (msg.txID == isotp_link_container->link.receive_arbitration_id &&
+								msg.rxID == isotp_link_container->link.send_arbitration_id) {
+								ESP_LOGD(BRIDGE_TAG, "container match [%d]", i);
+								isotp_link_container_id = i;
+								isotp_send(&isotp_link_container->link, msg.buffer, msg.msg_length);
+								xSemaphoreGive(isotp_link_container->wait_for_isotp_data_sem);
+								found_container = true;
+							}
 						rMUTEX(isotp_link_container->data_mutex);
+
+						if(found_container)
+							break;
 					}
 					free(msg.buffer);
 				}
 			}
+
+			//reset the WDT and yield to tasks
+			esp_task_wdt_reset();
 			taskYIELD();
 		}
 		ESP_LOGI(BRIDGE_TAG, "Send task stopped");
 	rMUTEX(isotp_send_task_mutex);
+
+	//unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
 }
 
 /* --------------------------- ISOTP Functions -------------------------------------- */
-void isotp_stop_task()
+void isotp_init()
 {
-	if (isotp_allow_run_tasks()) {
-		isotp_set_run_tasks(false);
-		for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++) {
-			IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[i];
-			xSemaphoreGive(isotp_link_container->wait_for_isotp_data_sem);
-			xSemaphoreTake(isotp_link_container->task_mutex, portMAX_DELAY);
-			xSemaphoreGive(isotp_link_container->task_mutex);
-		}
+	isotp_deinit();
 
-		send_message_t msg;
-		xQueueSend(isotp_send_message_queue, &msg, portMAX_DELAY);
-		xSemaphoreTake(isotp_send_task_mutex, portMAX_DELAY);
-		xSemaphoreGive(isotp_send_task_mutex);
-		ESP_LOGI(BRIDGE_TAG, "Tasks stopped");
-	}
-}
+	isotp_send_task_mutex		= xSemaphoreCreateMutex();
+	isotp_settings_mutex		= xSemaphoreCreateMutex();
+	isotp_receive_mutex			= xSemaphoreCreateMutex();
+	isotp_send_message_queue	= xQueueCreate(ISOTP_QUEUE_SIZE, sizeof(send_message_t));
 
-void isotp_start_task()
-{
-	isotp_stop_task();
-
-	isotp_set_run_tasks(true);
-
-	ESP_LOGI(BRIDGE_TAG, "Tasks starting");
-	xSemaphoreTake(sync_task_sem, 0);
-	// create tasks for each isotp_link
-	for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++)
-	{
-		IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[i];
-		xTaskCreate(isotp_processing_task, isotp_link_container->name, TASK_STACK_SIZE, isotp_link_container, ISOTP_TSK_PRIO, NULL);
-		xSemaphoreTake(sync_task_sem, portMAX_DELAY);
-	}
-
-	// "ISOTP_process" pumps the ISOTP library's "poll" method, which will call the send queue callback if a message needs to be sent.
-	// ISOTP_process also polls the ISOTP library's non-blocking receive method, which will produce a message if one is ready.
-	xTaskCreate(isotp_send_queue_task, "ISOTP_process_send_queue", TASK_STACK_SIZE, NULL, MAIN_TSK_PRIO, NULL);
-	xSemaphoreTake(sync_task_sem, portMAX_DELAY);
-	ESP_LOGI(BRIDGE_TAG, "Tasks started");
+	configure_isotp_links();
 }
 
 void isotp_deinit()
@@ -300,16 +294,45 @@ void isotp_deinit()
 		ESP_LOGI(BRIDGE_TAG, "Deinit");
 }
 
-void isotp_init()
+void isotp_start_task()
 {
-	isotp_deinit();
+	isotp_stop_task();
+	isotp_set_run_tasks(true);
 
-	isotp_send_task_mutex		= xSemaphoreCreateMutex();
-	isotp_settings_mutex		= xSemaphoreCreateMutex();
-	isotp_receive_mutex			= xSemaphoreCreateMutex();
-	isotp_send_message_queue	= xQueueCreate(ISOTP_QUEUE_SIZE, sizeof(send_message_t));
+	ESP_LOGI(BRIDGE_TAG, "Tasks starting");
+	xSemaphoreTake(sync_task_sem, 0);
+	// create tasks for each isotp_link
+	for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++)
+	{
+		IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[i];
+		xTaskCreate(isotp_processing_task, isotp_link_container->name, TASK_STACK_SIZE, isotp_link_container, ISOTP_TSK_PRIO, NULL);
+		xSemaphoreTake(sync_task_sem, portMAX_DELAY);
+	}
 
-	configure_isotp_links();
+	// "ISOTP_process" pumps the ISOTP library's "poll" method, which will call the send queue callback if a message needs to be sent.
+	// ISOTP_process also polls the ISOTP library's non-blocking receive method, which will produce a message if one is ready.
+	xTaskCreate(isotp_send_queue_task, "ISOTP_process_send_queue", TASK_STACK_SIZE, NULL, MAIN_TSK_PRIO, NULL);
+	xSemaphoreTake(sync_task_sem, portMAX_DELAY);
+	ESP_LOGI(BRIDGE_TAG, "Tasks started");
+}
+
+void isotp_stop_task()
+{
+	if (isotp_allow_run_tasks()) {
+		isotp_set_run_tasks(false);
+		for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++) {
+			IsoTpLinkContainer* isotp_link_container = &isotp_link_containers[i];
+			xSemaphoreGive(isotp_link_container->wait_for_isotp_data_sem);
+			xSemaphoreTake(isotp_link_container->task_mutex, portMAX_DELAY);
+			xSemaphoreGive(isotp_link_container->task_mutex);
+		}
+
+		send_message_t msg;
+		xQueueSend(isotp_send_message_queue, &msg, portMAX_DELAY);
+		xSemaphoreTake(isotp_send_task_mutex, portMAX_DELAY);
+		xSemaphoreGive(isotp_send_task_mutex);
+		ESP_LOGI(BRIDGE_TAG, "Tasks stopped");
+	}
 }
 
 bool16 isotp_allow_run_tasks()

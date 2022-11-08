@@ -2,6 +2,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "esp_task_wdt.h"
 #include "driver/twai.h"
 #include "esp_log.h"
 #include "isotp.h"
@@ -140,9 +141,9 @@ bool16 ch_take_uart_packet_timer_sem()
 	return xSemaphoreTake(ch_uart_packet_timer_sem, 0);
 }
 
-void ch_take_sleep_sem()
+BaseType_t ch_take_sleep_sem()
 {
-	xSemaphoreTake(ch_sleep_sem, portMAX_DELAY);
+	return xSemaphoreTake(ch_sleep_sem, pdMS_TO_TICKS(TIMEOUT_LONG));
 }
 
 void ch_give_sleep_sem()
@@ -165,48 +166,59 @@ bool16 ch_uart_connection_countdown()
 
 void ch_task(void *arg)
 {
-	xSemaphoreTake(ch_task_mutex, portMAX_DELAY);
-	xSemaphoreGive(sync_task_sem);
-	ESP_LOGI(CH_TAG, "Task started");
-	while(run_ch_task)
-	{
-		//count down our first boot timer
-		if(first_sleep_timer) {
-			first_sleep_timer--;
-		}
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
 
-		//Did we receive a CAN or uart message?
-		if((!ble_connected() && !ch_uart_connection_countdown()) && !first_sleep_timer && ch_take_can_timer_sem() == pdTRUE) {
-			if (can_connection_timer) {
-				can_connection_timer--;
+	//wait for task start sync
+	tMUTEX(ch_task_mutex);
+		xSemaphoreGive(sync_task_sem);
+
+		ESP_LOGI(CH_TAG, "Task started");
+		while(run_ch_task)
+		{
+			//count down our first boot timer
+			if(first_sleep_timer) {
+				first_sleep_timer--;
 			}
+
+			//Did we receive a CAN or uart message?
+			if((!ble_connected() && !ch_uart_connection_countdown()) && !first_sleep_timer && ch_take_can_timer_sem() == pdTRUE) {
+				if (can_connection_timer) {
+					can_connection_timer--;
+				}
 #ifdef ALLOW_SLEEP
-			if(!can_connection_timer)
-				ch_give_sleep_sem();
+				if(!can_connection_timer)
+					ch_give_sleep_sem();
 #endif
-		} else {
-			can_connection_timer = TIMEOUT_CANCONNECTION;
-		}
-
-		//check for packet timeout
-		if(ch_uart_connected() && ch_take_uart_packet_timer_sem() == pdTRUE) {
-			if (uart_packet_timer) {
-				uart_packet_timer--;
+			} else {
+				can_connection_timer = TIMEOUT_CANCONNECTION;
 			}
 
-			if (!uart_packet_timer)
-        		uart_buffer_clear();
-		} else {
-			uart_packet_timer = TIMEOUT_UARTPACKET;
+			//check for packet timeout
+			if(ch_uart_connected() && ch_take_uart_packet_timer_sem() == pdTRUE) {
+				if (uart_packet_timer) {
+					uart_packet_timer--;
+				}
+
+				if (!uart_packet_timer)
+        			uart_buffer_clear();
+			} else {
+				uart_packet_timer = TIMEOUT_UARTPACKET;
+			}
+
+			//give semaphores used for countdown timers
+			xSemaphoreGive(ch_can_timer_sem);
+			xSemaphoreGive(ch_uart_packet_timer_sem);
+
+			//reset the WDT and wait for next tick
+			esp_task_wdt_reset();
+			vTaskDelay(pdMS_TO_TICKS(1000));
 		}
+		ESP_LOGI(CH_TAG, "Task stopping");
+	rMUTEX(ch_task_mutex);
 
-		//give semaphores used for countdown timers
-		xSemaphoreGive(ch_can_timer_sem);
-		xSemaphoreGive(ch_uart_packet_timer_sem);
-
-		vTaskDelay(pdMS_TO_TICKS(1000));
-	}
-	ESP_LOGI(CH_TAG, "Task stopping");
-	xSemaphoreGive(ch_task_mutex);
+	//unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
 }

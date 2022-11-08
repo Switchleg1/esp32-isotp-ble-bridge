@@ -19,6 +19,8 @@
 #include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_err.h"
+#include "esp_task_wdt.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
 #include "string.h"
@@ -325,6 +327,10 @@ static void send_buffered_message(void)
 
 void send_task(void *pvParameters)
 {
+    //subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
+
     tMUTEX(ble_task_mutex);
 	    send_message_t event;
 	    while(ble_allow_run_tasks()) {
@@ -461,9 +467,15 @@ void send_task(void *pvParameters)
                     }
                 }
             }
+
+            //reset the WDT and yield to tasks
+			esp_task_wdt_reset();
 		    taskYIELD();
         }
     rMUTEX(ble_task_mutex);
+
+    //unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
 	vTaskDelete(NULL);
 }
 

@@ -4,6 +4,8 @@
 #include "freertos/semphr.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_err.h"
+#include "esp_task_wdt.h"
 #include "queues.h"
 #include "constants.h"
 #include "ble_server.h"
@@ -153,24 +155,34 @@ void uart_send(uint32_t txID, uint32_t rxID, uint8_t flags, const void* src, siz
 
 void uart_send_task(void *arg)
 {
-	xSemaphoreTake(uart_send_task_mutex, portMAX_DELAY);
-	ESP_LOGI(UART_TAG, "Task send started");
-	xSemaphoreGive(sync_task_sem);
-	send_message_t event;
-	while(uart_run_task)
-	{
-		if (xQueueReceive(uart_send_queue, &event, portMAX_DELAY) == pdTRUE) {
-			if (event.buffer) {
-				if (uart_run_task)
-					uart_write_bytes(UART_PORT_NUM, (const char*)event.buffer, event.msg_length);
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
 
-				free(event.buffer);
+	tMUTEX(uart_send_task_mutex);
+		ESP_LOGI(UART_TAG, "Task send started");
+		xSemaphoreGive(sync_task_sem);
+		send_message_t event;
+		while(uart_run_task)
+		{
+			if (xQueueReceive(uart_send_queue, &event, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
+				if (event.buffer) {
+					if (uart_run_task)
+						uart_write_bytes(UART_PORT_NUM, (const char*)event.buffer, event.msg_length);
+
+					free(event.buffer);
+				}
 			}
+
+			//reset the WDT and yield to tasks
+			esp_task_wdt_reset();
+			taskYIELD();
 		}
-		taskYIELD();
-	}
-	ESP_LOGI(UART_TAG, "Task send stopped");
-	xSemaphoreGive(uart_send_task_mutex);
+		ESP_LOGI(UART_TAG, "Task send stopped");
+	rMUTEX(uart_send_task_mutex);
+
+	//unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
 	vTaskDelete(NULL);
 }
 
@@ -338,67 +350,77 @@ bool16 uart_buffer_parse()
 
 void uart_receive_task(void *arg)
 {
-	xSemaphoreTake(uart_receive_task_mutex, portMAX_DELAY);
-	ESP_LOGI(UART_TAG, "Task receive started");
-	xSemaphoreGive(sync_task_sem);
-	uart_event_t 	event;
-	while(uart_run_task)
-	{
-		if(xQueueReceive(uart_receive_queue, &event, portMAX_DELAY) == pdTRUE) {
-			if (uart_run_task) {
-				tMUTEX(uart_buffer_mutex);
-					ESP_LOGI(UART_TAG, "uart[%d] event:", UART_PORT_NUM);
-					switch (event.type) {
-						case UART_DATA:
-							ESP_LOGI(UART_TAG, "[UART DATA]: %d", event.size);
-							uint8_t* tmp_buffer = malloc(event.size);
-							if (tmp_buffer) {
-								uart_read_bytes(UART_PORT_NUM, tmp_buffer, event.size, portMAX_DELAY);
-								uart_buffer_add(tmp_buffer, event.size);
-								free(tmp_buffer);
-								while (uart_buffer_parse());
-							}
-							else {
-								ESP_LOGD(UART_TAG, "uart_receive_task: malloc error size(%d)", event.size);
-							}
-							break;
-							//Event of HW FIFO overflow detected
-						case UART_FIFO_OVF:
-							ESP_LOGI(UART_TAG, "hw fifo overflow");
-							uart_buffer_clear_unsafe();
-							uart_flush_input(UART_PORT_NUM);
-							xQueueReset(uart_receive_queue);
-							break;
-							//Event of UART ring buffer full
-						case UART_BUFFER_FULL:
-							ESP_LOGI(UART_TAG, "ring buffer full");
-							uart_buffer_clear_unsafe();
-							uart_flush_input(UART_PORT_NUM);
-							xQueueReset(uart_receive_queue);
-							break;
-							//Event of UART RX break detected
-						case UART_BREAK:
-							ESP_LOGI(UART_TAG, "uart rx break");
-							break;
-							//Event of UART parity check error
-						case UART_PARITY_ERR:
-							ESP_LOGI(UART_TAG, "uart parity error");
-							break;
-							//Event of UART frame error
-						case UART_FRAME_ERR:
-							ESP_LOGI(UART_TAG, "uart frame error");
-							break;
-							//Others
-						default:
-							ESP_LOGI(UART_TAG, "uart event type: %d", event.type);
-							break;
-					}
-				rMUTEX(uart_buffer_mutex);
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
+
+	tMUTEX(uart_receive_task_mutex);
+		ESP_LOGI(UART_TAG, "Task receive started");
+		xSemaphoreGive(sync_task_sem);
+		uart_event_t 	event;
+		while(uart_run_task)
+		{
+			if(xQueueReceive(uart_receive_queue, &event, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
+				if (uart_run_task) {
+					tMUTEX(uart_buffer_mutex);
+						ESP_LOGI(UART_TAG, "uart[%d] event:", UART_PORT_NUM);
+						switch (event.type) {
+							case UART_DATA:
+								ESP_LOGI(UART_TAG, "[UART DATA]: %d", event.size);
+								uint8_t* tmp_buffer = malloc(event.size);
+								if (tmp_buffer) {
+									uart_read_bytes(UART_PORT_NUM, tmp_buffer, event.size, portMAX_DELAY);
+									uart_buffer_add(tmp_buffer, event.size);
+									free(tmp_buffer);
+									while (uart_buffer_parse());
+								}
+								else {
+									ESP_LOGD(UART_TAG, "uart_receive_task: malloc error size(%d)", event.size);
+								}
+								break;
+								//Event of HW FIFO overflow detected
+							case UART_FIFO_OVF:
+								ESP_LOGI(UART_TAG, "hw fifo overflow");
+								uart_buffer_clear_unsafe();
+								uart_flush_input(UART_PORT_NUM);
+								xQueueReset(uart_receive_queue);
+								break;
+								//Event of UART ring buffer full
+							case UART_BUFFER_FULL:
+								ESP_LOGI(UART_TAG, "ring buffer full");
+								uart_buffer_clear_unsafe();
+								uart_flush_input(UART_PORT_NUM);
+								xQueueReset(uart_receive_queue);
+								break;
+								//Event of UART RX break detected
+							case UART_BREAK:
+								ESP_LOGI(UART_TAG, "uart rx break");
+								break;
+								//Event of UART parity check error
+							case UART_PARITY_ERR:
+								ESP_LOGI(UART_TAG, "uart parity error");
+								break;
+								//Event of UART frame error
+							case UART_FRAME_ERR:
+								ESP_LOGI(UART_TAG, "uart frame error");
+								break;
+								//Others
+							default:
+								ESP_LOGI(UART_TAG, "uart event type: %d", event.type);
+								break;
+						}
+					rMUTEX(uart_buffer_mutex);
+				}
 			}
+
+			//reset the WDT and yield to tasks
+			esp_task_wdt_reset();
+			taskYIELD();
 		}
-		taskYIELD();
-    }
-	ESP_LOGI(UART_TAG, "Task receive stopped");
-	xSemaphoreGive(uart_receive_task_mutex);
+		ESP_LOGI(UART_TAG, "Task receive stopped");
+	rMUTEX(uart_receive_task_mutex);
+
+	//unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
 	vTaskDelete(NULL);
 }

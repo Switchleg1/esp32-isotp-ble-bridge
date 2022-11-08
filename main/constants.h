@@ -51,6 +51,7 @@ typedef int16_t							bool16;
 #define ALLOW_SLEEP
 #define RESET_ON_DISCONNECT
 #define SLEEP_TIME						5
+#define WDT_TIMEOUT_MS					5
 #define US_TO_S							1000000
 
 //#define PASSWORD_CHECK

@@ -3,6 +3,8 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_err.h"
+#include "esp_task_wdt.h"
 #include "queues.h"
 #include "ble_server.h"
 #include "constants.h"
@@ -301,6 +303,10 @@ return_false:
 
 void persist_task(void *arg)
 {
+	//subscribe to WDT
+	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
+
 	persist_t *pPersist = ((persist_t*)arg);
 	tMUTEX(pPersist->task_mutex);
 		tMUTEX(pPersist->data_mutex);
@@ -331,12 +337,18 @@ void persist_task(void *arg)
 					pPersist->next_packet = current_time + required_delay;
 				rMUTEX(pPersist->data_mutex);
 			}
+
+			//reset the WDT and wait our delay
+			esp_task_wdt_reset();
 			vTaskDelay(pdMS_TO_TICKS(current_delay));
 		}
 		tMUTEX(pPersist->data_mutex);
 			ESP_LOGI(PERSIST_TAG, "Task stopped: %d", pPersist->number);
 		rMUTEX(pPersist->data_mutex);
 	rMUTEX(pPersist->task_mutex);
+
+	//unsubscribe to WDT and delete task
+	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
 	vTaskDelete(NULL);
 }
 
