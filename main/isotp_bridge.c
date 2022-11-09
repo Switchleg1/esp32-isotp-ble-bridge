@@ -46,7 +46,8 @@ void	isotp_set_run_tasks(bool16 allow);
 
 /* ---------------------------- ISOTP Callbacks ---------------------------- */
 
-int isotp_user_send_can(const uint32_t arbitration_id, const uint8_t* data, const uint16_t size) {
+int isotp_user_send_can(const uint32_t arbitration_id, const uint8_t* data, const uint16_t size)
+{
     twai_message_t frame = {.identifier = arbitration_id, .data_length_code = size};
     memcpy(frame.data, data, sizeof(frame.data));
 	xQueueSend(can_send_queue, &frame, portMAX_DELAY);
@@ -54,11 +55,13 @@ int isotp_user_send_can(const uint32_t arbitration_id, const uint8_t* data, cons
     return ISOTP_RET_OK;                           
 }
 
-uint64_t isotp_user_get_us(void) {
+uint64_t isotp_user_get_us()
+{
 	return esp_timer_get_time();
 }
 
-void isotp_user_debug(const char* message, ...) {
+void isotp_user_debug(const char* message, ...)
+{
 	ESP_LOGD(BRIDGE_TAG, "ISOTP: %s", message);
 }
 
@@ -785,10 +788,6 @@ void bridge_disconnect()
 
 	//disable password support
 	set_password_checked(false);
-
-#ifdef RESET_ON_DISCONNECT
-	ch_give_sleep_sem();
-#endif
 }
 
 void ch_on_uart_connect()

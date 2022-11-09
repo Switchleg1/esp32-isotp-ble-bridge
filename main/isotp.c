@@ -268,11 +268,13 @@ int isotp_send_with_id(IsoTpLink *link, uint32_t id, const uint8_t payload[], ui
 
         /* init multi-frame control flags */
         if (ISOTP_RET_OK == ret) {
+            uint64_t isotp_time = isotp_user_get_us();
+
             link->send_bs_remain = 0;
 			link->send_st_min = 0;
             link->send_wtf_count = 0;
-			link->send_timer_st = isotp_user_get_us();
-			link->send_timer_bs = isotp_user_get_us() + ISO_TP_DEFAULT_RESPONSE_TIMEOUT;
+			link->send_timer_st = isotp_time;
+			link->send_timer_bs = isotp_time + ISO_TP_DEFAULT_RESPONSE_TIMEOUT;
             link->send_protocol_result = ISOTP_PROTOCOL_RESULT_OK;
 			link->send_status = ISOTP_SEND_STATUS_INPROGRESS;
         }
@@ -485,20 +487,22 @@ void isotp_poll(IsoTpLink *link) {
 
     /* only polling when operation in progress */
     if (ISOTP_SEND_STATUS_INPROGRESS == link->send_status) {
-
+        uint64_t isotp_time = isotp_user_get_us();
         /* continue send data */
         if (/* send data if bs_remain is invalid or bs_remain large than zero */
-        (ISOTP_INVALID_BS == link->send_bs_remain || link->send_bs_remain > 0) &&
-		/* and if st_min is zero or go beyond interval time */
-		(0 == link->send_st_min || (0 != link->send_st_min && isotp_user_get_us() > link->send_timer_st))) {
-            
+            (ISOTP_INVALID_BS == link->send_bs_remain || link->send_bs_remain > 0) &&
+		    /* and if st_min is zero or go beyond interval time */
+		    (0 == link->send_st_min || (0 != link->send_st_min && isotp_time > link->send_timer_st))) {
+
             ret = isotp_send_consecutive_frame(link);
             if (ISOTP_RET_OK == ret) {
                 if (ISOTP_INVALID_BS != link->send_bs_remain) {
                     link->send_bs_remain -= 1;
                 }
-				link->send_timer_bs = isotp_user_get_us() + ISO_TP_DEFAULT_RESPONSE_TIMEOUT;
-				link->send_timer_st = isotp_user_get_us() + link->send_st_min;
+
+                isotp_time = isotp_user_get_us();
+				link->send_timer_bs = isotp_time + ISO_TP_DEFAULT_RESPONSE_TIMEOUT;
+				link->send_timer_st = isotp_time + link->send_st_min;
 
                 /* check if send finish */
                 if (link->send_offset >= link->send_size) {
@@ -510,7 +514,7 @@ void isotp_poll(IsoTpLink *link) {
         }
 
         /* check timeout */
-		if(isotp_user_get_us() > link->send_timer_bs) {
+		if(isotp_time > link->send_timer_bs) {
             link->send_protocol_result = ISOTP_PROTOCOL_RESULT_TIMEOUT_BS;
             link->send_status = ISOTP_SEND_STATUS_ERROR;
         }
@@ -526,7 +530,5 @@ void isotp_poll(IsoTpLink *link) {
             link->receive_status = ISOTP_RECEIVE_STATUS_IDLE;
         }
     }
-
-    return;
 }
 

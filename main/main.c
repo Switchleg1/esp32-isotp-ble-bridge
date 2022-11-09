@@ -61,39 +61,54 @@ void app_main(void)
 		free(gapName);
 	}
 
-	//setup BLE server
-    ble_server_callbacks callbacks = {
-		.data_received = received_from_ble,
-		.notifications_subscribed = bridge_connect,
-		.notifications_unsubscribed = bridge_disconnect
-    };
+#if SLEEP_MODE == 1
+	while(1) {
+#endif
+		//setup BLE server
+		ble_server_callbacks callbacks = {
+			.data_received = received_from_ble,
+			.notifications_subscribed = bridge_connect,
+			.notifications_unsubscribed = bridge_disconnect
+		};
 
-	//start tasks
-	ble_server_start(callbacks);
-	twai_start_task();
-	isotp_start_task();
-	persist_start_task();
-	uart_start_task();
-	ch_start_task();
+		//start tasks
+		ble_server_start(callbacks);
+		twai_start_task();
+		isotp_start_task();
+		persist_start_task();
+		uart_start_task();
+		ch_start_task();
 
-	//wait for sleep command
-	while(ch_take_sleep_sem() != pdTRUE)
+		//wait for sleep command
+		while(ch_take_sleep_sem() != pdTRUE)
+			esp_task_wdt_reset();
+
+		//stop ble connections
+		ble_stop_advertising();
+		while (ble_connected()) {
+			vTaskDelay(pdMS_TO_TICKS(TIMEOUT_NORMAL));
+			esp_task_wdt_reset();
+		}
+	
+		//stop tasks
+		ch_stop_task();
+		uart_stop_task();
+		persist_stop_task();
+		isotp_stop_task();
+		twai_stop_task();
+		ble_server_stop();
+
+		//setup sleep timer
+		esp_sleep_enable_timer_wakeup(SLEEP_TIME * US_TO_S);
+		ESP_LOGI(MAIN_TAG, "Timeout - Sleeping [%ds]", SLEEP_TIME);
+
+#if SLEEP_MODE == 1
+		vTaskDelay(pdMS_TO_TICKS(TIMEOUT_LONG));
 		esp_task_wdt_reset();
-
-	//stop ble connections
-	ble_stop_advertising();
-	while (ble_connected()) {
-		vTaskDelay(pdMS_TO_TICKS(TIMEOUT_NORMAL));
+		esp_light_sleep_start();
 		esp_task_wdt_reset();
 	}
-	
-	//stop tasks
-	ch_stop_task();
-	uart_stop_task();
-	persist_stop_task();
-	isotp_stop_task();
-	twai_stop_task();
-	ble_server_stop();
+#endif
 
 	//deinit
 	persist_deinit();
@@ -103,10 +118,6 @@ void app_main(void)
 	led_deinit();
 	ch_deinit();
 	ble_server_deinit();
-
-	//setup sleep timer
-	esp_sleep_enable_timer_wakeup(SLEEP_TIME * US_TO_S);
-	ESP_LOGI(MAIN_TAG, "Timeout - Sleeping [%ds]", SLEEP_TIME);
 
 	//unsubscribe to WDT and deinit
 	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));

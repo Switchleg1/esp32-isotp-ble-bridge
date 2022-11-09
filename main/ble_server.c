@@ -486,7 +486,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 
     switch (event) {
     case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
-        esp_ble_gap_start_advertising(&spp_adv_params);
+        ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&spp_adv_params));
         break;
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
         //advertising start complete event to indicate advertising start successfully or failed
@@ -509,13 +509,13 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
     	case ESP_GATTS_REG_EVT:
 			ESP_LOGI(BLE_TAG, "%s %d", __func__, __LINE__);
             tMUTEX(ble_settings_mutex);
-			    esp_ble_gap_set_device_name(ble_gap_name);
+			    ESP_ERROR_CHECK(esp_ble_gap_set_device_name(ble_gap_name));
 			    ESP_LOGI(BLE_TAG, "%s %d", __func__, __LINE__);
-			    esp_ble_gap_config_adv_data_raw((uint8_t *)spp_adv_data, spp_adv_data[7] + 8);
+			    ESP_ERROR_CHECK(esp_ble_gap_config_adv_data_raw((uint8_t *)spp_adv_data, spp_adv_data[7] + 8));
             rMUTEX(ble_settings_mutex);
 
 			ESP_LOGI(BLE_TAG, "%s %d", __func__, __LINE__);
-        	esp_ble_gatts_create_attr_tab(spp_gatt_db, gatts_if, SPP_IDX_NB, SPP_SVC_INST_ID);
+        	ESP_ERROR_CHECK(esp_ble_gatts_create_attr_tab(spp_gatt_db, gatts_if, SPP_IDX_NB, SPP_SVC_INST_ID));
        	break;
         case ESP_GATTS_READ_EVT:
 			res = find_char_and_desr_index(p_data->read.handle);
@@ -587,7 +587,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
 			spp_mtu_size = DEFAULT_MTU_SIZE;
             ESP_LOGI(BLE_TAG, "GATTS Disconnected");
             if(ble_allow_connection())
-			    esp_ble_gap_start_advertising(&spp_adv_params);
+			    ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&spp_adv_params));
 			break;
     	case ESP_GATTS_OPEN_EVT:
     	    break;
@@ -615,7 +615,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
     	    }
     	    else {
     	        memcpy(spp_handle_table, param->add_attr_tab.handles, sizeof(spp_handle_table));
-    	        esp_ble_gatts_start_service(spp_handle_table[SPP_IDX_SVC]);
+    	        ESP_ERROR_CHECK(esp_ble_gatts_start_service(spp_handle_table[SPP_IDX_SVC]));
     	    }
     	    break;
     	}
@@ -705,37 +705,15 @@ void ble_server_start(ble_server_callbacks callbacks)
 
     //initialize ble
     server_callbacks = callbacks;
-    esp_err_t ret;
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
-
-    ret = esp_bt_controller_init(&bt_cfg);
-    if (ret) {
-		ESP_LOGE(BLE_TAG, "%s enable controller failed: %s", __func__, esp_err_to_name(ret));
-        return;
-    }
-
-    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-	if (ret) {
-		ESP_LOGE(BLE_TAG, "%s enable controller failed: %s", __func__, esp_err_to_name(ret));
-        return;
-    }
-
-	ESP_LOGI(BLE_TAG, "%s init bluetooth", __func__);
-    ret = esp_bluedroid_init();
-    if (ret) {
-		ESP_LOGE(BLE_TAG, "%s init bluetooth failed: %s", __func__, esp_err_to_name(ret));
-        return;
-    }
-	ret = esp_bluedroid_enable();
-    if (ret) {
-		ESP_LOGE(BLE_TAG, "%s enable bluetooth failed: %s", __func__, esp_err_to_name(ret));
-        return;
-    }
-
-    esp_ble_gatts_register_callback(gatts_event_handler);
-    esp_ble_gap_register_callback(gap_event_handler);
-    esp_ble_gatts_app_register(ESP_SPP_APP_ID);
+    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
+    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
+    ESP_ERROR_CHECK(esp_bluedroid_init());
+	ESP_ERROR_CHECK(esp_bluedroid_enable());
+    ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
+    ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
+    ESP_ERROR_CHECK(esp_ble_gatts_app_register(ESP_SPP_APP_ID));
 
     //start send task
     ble_set_run_tasks(true);
@@ -767,6 +745,8 @@ void ble_server_stop()
         //shutdown BLE
         esp_bluedroid_disable();
         esp_bluedroid_deinit();
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
 
         ESP_LOGI(BLE_TAG, "Stopped");
     }
@@ -851,7 +831,7 @@ bool16 ble_set_gap_name(char* name, bool16 set)
 			    strcpy(ble_gap_name, name);
 			
                 if(set)
-				    esp_ble_gap_set_device_name(ble_gap_name);
+				    ESP_ERROR_CHECK(esp_ble_gap_set_device_name(ble_gap_name));
 
 			    ESP_LOGI(BLE_TAG, "Set GAP name [%s]", ble_gap_name);
             rMUTEX(ble_settings_mutex);
@@ -892,7 +872,7 @@ void ble_stop_advertising()
         allow_connection = false;
     rMUTEX(ble_settings_mutex);
 
-    esp_ble_gap_stop_advertising();
+    ESP_ERROR_CHECK(esp_ble_gap_stop_advertising());
 }
 
 void ble_start_advertising()
@@ -901,5 +881,5 @@ void ble_start_advertising()
         allow_connection = true;
     rMUTEX(ble_settings_mutex);
 
-    esp_ble_gap_start_advertising(&spp_adv_params);
+    ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&spp_adv_params));
 }

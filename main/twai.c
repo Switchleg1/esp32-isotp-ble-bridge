@@ -171,6 +171,7 @@ void twai_stop_task()
 
 		ESP_LOGI(TWAI_TAG, "Tasks stopped");
 
+		twai_stop();
 		twai_driver_uninstall();
 
 		ESP_LOGI(TWAI_TAG, "Driver uninstalled");
@@ -283,24 +284,26 @@ void twai_alert_task(void* arg)
 		ESP_LOGI(TWAI_TAG, "Alert task started");
 		xSemaphoreGive(sync_task_sem);
 		uint32_t alerts;
-		while (twai_allow_run_task())
-		{
+		while (twai_allow_run_task()) {
+
 			if (twai_read_alerts(&alerts, pdMS_TO_TICKS(TIMEOUT_LONG)) == ESP_OK) {
 				if (alerts & TWAI_ALERT_ABOVE_ERR_WARN) {
 					ESP_LOGI(TWAI_TAG, "Surpassed Error Warning Limit");
 				}
+
 				if (alerts & TWAI_ALERT_ERR_PASS) {
 					ESP_LOGI(TWAI_TAG, "Entered Error Passive state");
 				}
+
 				if (alerts & TWAI_ALERT_BUS_OFF) {
 					ESP_LOGI(TWAI_TAG, "Bus Off state");
 					if (xSemaphoreTake(twai_bus_off_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL)) == pdTRUE) {
 						ESP_LOGW(TWAI_TAG, "Initiate bus recovery");
-						vTaskDelay(pdMS_TO_TICKS(1000));
 						twai_initiate_recovery();    //Needs 128 occurrences of bus free signal
 						ESP_LOGI(TWAI_TAG, "Initiate bus recovery");
 					}
 				}
+
 				if (alerts & TWAI_ALERT_BUS_RECOVERED) {
 					xSemaphoreGive(twai_bus_off_mutex);
 					ESP_LOGI(TWAI_TAG, "Bus Recovered");

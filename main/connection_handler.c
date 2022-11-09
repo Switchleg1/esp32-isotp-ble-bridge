@@ -86,6 +86,7 @@ void ch_start_task()
 
 	xSemaphoreTake(ch_settings_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL));
 	run_ch_task = true;
+	can_connection_timer = TIMEOUT_CANCONNECTION;
 	xSemaphoreGive(ch_settings_mutex);
 
 	ESP_LOGI(CH_TAG, "Task starting");

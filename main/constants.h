@@ -43,18 +43,18 @@ typedef int16_t							bool16;
 #define TIMEOUT_NORMAL					100
 #define TIMEOUT_LONG					1000
 
-#define TIMEOUT_CANCONNECTION			1
+#define TIMEOUT_CANCONNECTION			2
 #define TIMEOUT_FIRSTBOOT				30
 #define TIMEOUT_UARTCONNECTION			120
 #define TIMEOUT_UARTPACKET				1
 
-#define ALLOW_SLEEP
-#define RESET_ON_DISCONNECT
+//#define ALLOW_SLEEP
+#define SLEEP_MODE						0	/* 0 is deep sleep, 1 is light sleep */
 #define SLEEP_TIME						5
 #define WDT_TIMEOUT_S					5
 #define US_TO_S							1000000
 
-//#define PASSWORD_CHECK
+//#define PASSWORD_CHECK 
 #define MAX_PASSWORD_LENGTH				64
 #define PASSWORD_KEY					"Password"
 #define PASSWORD_DEFAULT			   	"BLE2"
@@ -71,7 +71,6 @@ typedef int16_t							bool16;
 #define CAN_CLK_DIVIDER					0
 #define CAN_TIMING						TWAI_TIMING_CONFIG_500KBITS()
 #define CAN_FILTER						TWAI_FILTER_CONFIG_ACCEPT_ALL()
-#define ISOTP_STMIN						1000
 
 #define UART_TXD 						UART_PIN_NO_CHANGE
 #define UART_RXD 						UART_PIN_NO_CHANGE
