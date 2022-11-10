@@ -6,7 +6,6 @@
 #include "driver/twai.h"
 #include "esp_log.h"
 #include "isotp.h"
-#include "queues.h"
 #include "constants.h"
 #include "connection_handler.h"
 #include "ble_server.h"

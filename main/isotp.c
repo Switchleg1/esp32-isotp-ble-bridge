@@ -65,9 +65,7 @@ static int isotp_send_single_frame(IsoTpLink* link, uint32_t id) {
     (void) memset(message.as.single_frame.data + link->send_size, 0xAA, sizeof(message.as.single_frame.data) - link->send_size);
     ret = isotp_user_send_can(id, message.as.data_array.ptr, sizeof(message));
 #else
-    ret = isotp_user_send_can(id,
-            message.as.data_array.ptr,
-            link->send_size + 1);
+    ret = isotp_user_send_can(id, message.as.data_array.ptr,link->send_size + 1);
 #endif
 
     return ret;

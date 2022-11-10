@@ -16,7 +16,6 @@
 #include "ble_server.h"
 #include "isotp_link_containers.h"
 #include "twai.h"
-#include "queues.h"
 #include "persist.h"
 #include "constants.h"
 #include "led.h"
@@ -28,17 +27,18 @@
 #define BRIDGE_TAG 					"Bridge"
 
 /* ------------------------ global vars ------------------------------------ */
-static SemaphoreHandle_t	isotp_send_task_mutex	= NULL;
-static SemaphoreHandle_t	isotp_settings_mutex	= NULL;
-static SemaphoreHandle_t	isotp_receive_mutex		= NULL;
-static bool16				isotp_run_tasks			= false;
+static QueueHandle_t		isotp_send_message_queue	= NULL;
+static SemaphoreHandle_t	isotp_send_task_mutex		= NULL;
+static SemaphoreHandle_t	isotp_settings_mutex		= NULL;
+static SemaphoreHandle_t	isotp_receive_mutex			= NULL;
+static bool16				isotp_run_tasks				= false;
 static ble_header_t			split_header;
-static uint16_t				split_enabled 			= false;
-static uint8_t 				split_count 			= 0;
-static uint16_t				split_length 			= 0;
-static uint8_t*				split_data 				= NULL;
+static uint16_t				split_enabled 				= false;
+static uint8_t 				split_count 				= 0;
+static uint16_t				split_length 				= 0;
+static uint8_t*				split_data 					= NULL;
 #ifdef PASSWORD_CHECK
-static bool16				passwordChecked			= false;
+static bool16				passwordChecked				= false;
 #endif
 
 bool16	isotp_allow_run_tasks();
@@ -50,7 +50,7 @@ int isotp_user_send_can(const uint32_t arbitration_id, const uint8_t* data, cons
 {
     twai_message_t frame = {.identifier = arbitration_id, .data_length_code = size};
     memcpy(frame.data, data, sizeof(frame.data));
-	xQueueSend(can_send_queue, &frame, portMAX_DELAY);
+	twai_send(&frame);
 
     return ISOTP_RET_OK;                           
 }
@@ -748,11 +748,6 @@ release_mutex:
 	rMUTEX(isotp_receive_mutex);
 }
 
-void received_from_ble(const void* src, size_t size)
-{
-	packet_received(src, size);
-}
-
 void uart_data_received(const void* src, size_t size)
 {
 	if(!ble_connected()) {
@@ -798,4 +793,19 @@ void ch_on_uart_connect()
 void ch_on_uart_disconnect()
 {
 	bridge_disconnect();
+}
+
+void bridge_received_ble(const void* src, size_t size)
+{
+	packet_received(src, size);
+}
+
+int32_t	bridge_send_isotp(send_message_t *msg)
+{
+	return xQueueSend(isotp_send_message_queue, msg, pdMS_TO_TICKS(TIMEOUT_SHORT));
+}
+
+uint16_t bridge_send_available()
+{
+	return uxQueueSpacesAvailable(isotp_send_message_queue);
 }

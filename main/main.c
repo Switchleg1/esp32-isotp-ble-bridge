@@ -16,7 +16,6 @@
 #include "ble_server.h"
 #include "isotp_link_containers.h"
 #include "twai.h"
-#include "queues.h"
 #include "persist.h"
 #include "constants.h"
 #include "led.h"
@@ -66,7 +65,7 @@ void app_main(void)
 #endif
 		//setup BLE server
 		ble_server_callbacks callbacks = {
-			.data_received = received_from_ble,
+			.data_received = bridge_received_ble,
 			.notifications_subscribed = bridge_connect,
 			.notifications_unsubscribed = bridge_disconnect
 		};
@@ -103,6 +102,7 @@ void app_main(void)
 		ESP_LOGI(MAIN_TAG, "Timeout - Sleeping [%ds]", SLEEP_TIME);
 
 #if SLEEP_MODE == 1
+		esp_task_wdt_reset();
 		vTaskDelay(pdMS_TO_TICKS(TIMEOUT_LONG));
 		esp_task_wdt_reset();
 		esp_light_sleep_start();

@@ -36,6 +36,9 @@ typedef int16_t							bool16;
 #define LED_GPIO_NUM 					2 // For A0
 #define GPIO_OUTPUT_PIN_SEL(X)  		((1ULL<<X))
 
+#define ISOTP_QUEUE_SIZE				64
+#define UART_QUEUE_SIZE					96
+
 #define ISOTP_BUFFER_SIZE 				4096
 #define ISOTP_BUFFER_SIZE_SMALL 		512
 

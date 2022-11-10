@@ -5,7 +5,6 @@
 #include "driver/twai.h"
 #include "esp_log.h"
 #include "isotp.h"
-#include "queues.h"
 #include "isotp_link_containers.h"
 #include "constants.h"
 

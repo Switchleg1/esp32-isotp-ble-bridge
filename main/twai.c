@@ -7,7 +7,6 @@
 #include "esp_err.h"
 #include "esp_task_wdt.h"
 #include "isotp.h"
-#include "queues.h"
 #include "isotp_link_containers.h"
 #include "driver/twai.h"
 #include "constants.h"
@@ -31,14 +30,12 @@ static const twai_general_config_t g_config = {
 static const twai_timing_config_t	t_config				= CAN_TIMING;
 static const twai_filter_config_t	f_config				= CAN_FILTER;
 static SemaphoreHandle_t			twai_receive_task_mutex = NULL;
-static SemaphoreHandle_t			twai_send_task_mutex	= NULL;
 static SemaphoreHandle_t			twai_alert_task_mutex	= NULL;
 static SemaphoreHandle_t			twai_bus_off_mutex		= NULL;
 static SemaphoreHandle_t			twai_settings_mutex		= NULL;
 static bool16						twai_run_task			= false;
 
 void twai_receive_task(void *arg);
-void twai_transmit_task(void *arg);
 void twai_alert_task(void* arg);
 
 void twai_set_run_task(bool16 allow)
@@ -63,11 +60,9 @@ void twai_init()
 
 	//init mutexes
 	twai_receive_task_mutex = xSemaphoreCreateMutex();
-	twai_send_task_mutex	= xSemaphoreCreateMutex();
 	twai_alert_task_mutex	= xSemaphoreCreateMutex();
 	twai_bus_off_mutex		= xSemaphoreCreateMutex();
 	twai_settings_mutex		= xSemaphoreCreateMutex();
-	can_send_queue			= xQueueCreate(CAN_QUEUE_SIZE, sizeof(twai_message_t));
 
 	// Need to pull down GPIO 21 to unset the "S" (Silent Mode) pin on CAN Xceiver.
     gpio_config_t io_conf;
@@ -86,21 +81,9 @@ void twai_deinit()
 {
 	bool16 didDeInit = false;
 
-	if (can_send_queue) {
-		vQueueDelete(can_send_queue);
-		can_send_queue = NULL;
-		didDeInit = true;
-	}
-
 	if (twai_receive_task_mutex) {
 		vSemaphoreDelete(twai_receive_task_mutex);
 		twai_receive_task_mutex = NULL;
-		didDeInit = true;
-	}
-
-	if (twai_send_task_mutex) {
-		vSemaphoreDelete(twai_send_task_mutex);
-		twai_send_task_mutex = NULL;
 		didDeInit = true;
 	}
 
@@ -147,9 +130,6 @@ void twai_start_task()
 	xTaskCreate(twai_receive_task, "TWAI_rx", TASK_STACK_SIZE, NULL, TWAI_TASK_PRIO, NULL);
 	xSemaphoreTake(sync_task_sem, portMAX_DELAY);
 
-	xTaskCreate(twai_transmit_task, "TWAI_tx", TASK_STACK_SIZE, NULL, TWAI_TASK_PRIO, NULL);
-	xSemaphoreTake(sync_task_sem, portMAX_DELAY);
-
 	ESP_LOGI(TWAI_TAG, "Tasks started");
 }
 
@@ -160,11 +140,6 @@ void twai_stop_task()
 
 		tMUTEX(twai_receive_task_mutex);
 		rMUTEX(twai_receive_task_mutex);
-		
-		twai_message_t twai_tx_msg;
-		xQueueSend(can_send_queue, &twai_tx_msg, portMAX_DELAY);
-		tMUTEX(twai_send_task_mutex);
-		rMUTEX(twai_send_task_mutex);
 
 		tMUTEX(twai_alert_task_mutex);
 		rMUTEX(twai_alert_task_mutex);
@@ -236,42 +211,11 @@ void twai_receive_task(void *arg)
     vTaskDelete(NULL);
 }
 
-void twai_transmit_task(void *arg)
+void twai_send(twai_message_t *twai_tx_msg)
 {
-	//subscribe to WDT
-	ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
-	ESP_ERROR_CHECK(esp_task_wdt_status(NULL));
-
-	tMUTEX(twai_send_task_mutex);
-		ESP_LOGI(TWAI_TAG, "Send task started");
-		xSemaphoreGive(sync_task_sem);
-		twai_message_t twai_tx_msg;
-		while (twai_allow_run_task())
-		{
-			if (xQueueReceive(can_send_queue, &twai_tx_msg, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
-				if (twai_allow_run_task()) {
-					xSemaphoreTake(twai_bus_off_mutex, portMAX_DELAY);
-					xSemaphoreGive(twai_bus_off_mutex);
-
-					ESP_LOGD(TWAI_TAG, "Sending TWAI Message with ID %08X", twai_tx_msg.identifier);
-					for (int i = 0; i < twai_tx_msg.data_length_code; i++) {
-						ESP_LOGD(TWAI_TAG, "TX Data: %02X", twai_tx_msg.data[i]);
-					}
-					twai_transmit(&twai_tx_msg, portMAX_DELAY);
-					ESP_LOGD(TWAI_TAG, "Sent TWAI Message with ID %08X", twai_tx_msg.identifier);
-				}
-			}
-
-			//reset the WDT and yield to tasks
-			esp_task_wdt_reset();
-			taskYIELD();
-		}
-		ESP_LOGI(TWAI_TAG, "Send task stopped");
-	rMUTEX(twai_send_task_mutex);
-
-	//unsubscribe to WDT and delete task
-	ESP_ERROR_CHECK(esp_task_wdt_delete(NULL));
-    vTaskDelete(NULL);
+	tMUTEX(twai_bus_off_mutex);
+	rMUTEX(twai_bus_off_mutex);
+	twai_transmit(twai_tx_msg, portMAX_DELAY);
 }
 
 void twai_alert_task(void* arg)

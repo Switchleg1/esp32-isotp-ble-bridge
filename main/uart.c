@@ -6,14 +6,15 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_task_wdt.h"
-#include "queues.h"
+#include "uart.h"
 #include "constants.h"
 #include "ble_server.h"
 #include "connection_handler.h"
-#include "uart.h"
 
 #define UART_TAG 		"UART"
 
+static QueueHandle_t		uart_send_queue				= NULL;
+static QueueHandle_t		uart_receive_queue			= NULL;
 static SemaphoreHandle_t	uart_buffer_mutex			= NULL;
 static SemaphoreHandle_t	uart_receive_task_mutex		= NULL;
 static SemaphoreHandle_t	uart_send_task_mutex		= NULL;

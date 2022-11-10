@@ -5,7 +5,6 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_task_wdt.h"
-#include "queues.h"
 #include "ble_server.h"
 #include "constants.h"
 #include "led.h"
@@ -13,6 +12,7 @@
 #include "isotp.h"
 #include "isotp_link_containers.h"
 #include "connection_handler.h"
+#include "isotp_bridge.h"
 
 #define PERSIST_TAG	"Persist"
 
@@ -247,7 +247,7 @@ bool16 persist_send(persist_t* pPersist)
 			goto return_false;
 
 		//don't flood the queues
-		if (!uxQueueSpacesAvailable(isotp_send_message_queue) || !ble_queue_spaces())
+		if (!bridge_send_available() || !ble_queue_spaces())
 		{
 			ESP_LOGW(PERSIST_TAG, "Unable to send message: queues are full");
 			xSemaphoreGive(pPersist->send_sema);
@@ -285,7 +285,7 @@ bool16 persist_send(persist_t* pPersist)
 	rMUTEX(pPersist->data_mutex);
 
 	//if we fail to place message into the queue free the memory!
-	if (xQueueSend(isotp_send_message_queue, &msg, pdMS_TO_TICKS(TIMEOUT_SHORT)) != pdTRUE) {
+	if (bridge_send_isotp(&msg) != pdTRUE) {
 		free(msg.buffer);
 		xSemaphoreGive(pPersist->send_sema);
 		return false;
