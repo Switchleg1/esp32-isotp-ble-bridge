@@ -403,8 +403,10 @@ void isotp_on_can_message(IsoTpLink *link, uint8_t *data, uint16_t len) {
             ret = isotp_receive_flow_control_frame(link, &message, len);
             
             if (ISOTP_RET_OK == ret) {
+                uint64_t isotp_time = isotp_user_get_us();
+
                 /* refresh bs timer */
-				link->send_timer_bs = isotp_user_get_us() + ISO_TP_DEFAULT_RESPONSE_TIMEOUT;
+				link->send_timer_bs = isotp_time + ISO_TP_DEFAULT_RESPONSE_TIMEOUT;
 
                 /* overflow */
                 if (PCI_FLOW_STATUS_OVERFLOW == message.as.flow_control.FS) {
@@ -417,8 +419,8 @@ void isotp_on_can_message(IsoTpLink *link, uint8_t *data, uint16_t len) {
                     link->send_wtf_count += 1;
                     /* wait exceed allowed count */
                     if (link->send_wtf_count > ISO_TP_MAX_WFT_NUMBER) {
-                        link->send_protocol_result = ISOTP_PROTOCOL_RESULT_WFT_OVRN;
-                        link->send_status = ISOTP_SEND_STATUS_ERROR;
+                        link->send_protocol_result  = ISOTP_PROTOCOL_RESULT_WFT_OVRN;
+                        link->send_status           = ISOTP_SEND_STATUS_ERROR;
                     }
                 }
 
@@ -429,8 +431,9 @@ void isotp_on_can_message(IsoTpLink *link, uint8_t *data, uint16_t len) {
                     } else {
 						link->send_bs_remain = message.as.flow_control.BS;
                     }
-					link->send_st_min = link->stmin_override ? link->stmin_override : stmin_to_us(message.as.flow_control.STmin);
-                    link->send_wtf_count = 0;
+					link->send_st_min       = link->stmin_override ? link->stmin_override : stmin_to_us(message.as.flow_control.STmin);
+                    link->send_timer_st     = isotp_time + link->send_st_min;
+                    link->send_wtf_count    = 0;
                 }
             }
             break;
