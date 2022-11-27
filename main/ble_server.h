@@ -1,3 +1,6 @@
+#ifndef BLE_SERVER_H
+#define BLE_SERVER_H
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,3 +101,5 @@ bool16      ble_get_gap_name(char* name);
 bool16      ble_allow_connection();
 void        ble_stop_advertising();
 void        ble_start_advertising();
+
+#endif

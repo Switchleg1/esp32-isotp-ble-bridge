@@ -243,12 +243,13 @@ void twai_alert_task(void* arg)
 					ESP_LOGI(TWAI_TAG, "Bus Off state");
 					if (xSemaphoreTake(twai_bus_off_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL)) == pdTRUE) {
 						ESP_LOGW(TWAI_TAG, "Initiate bus recovery");
-						twai_initiate_recovery();    //Needs 128 occurrences of bus free signal
+						ESP_ERROR_CHECK(twai_initiate_recovery());    //Needs 128 occurrences of bus free signal
 						ESP_LOGI(TWAI_TAG, "Initiate bus recovery");
 					}
 				}
 
 				if (alerts & TWAI_ALERT_BUS_RECOVERED) {
+					ESP_ERROR_CHECK(twai_start());
 					xSemaphoreGive(twai_bus_off_mutex);
 					ESP_LOGI(TWAI_TAG, "Bus Recovered");
 				}

@@ -11,6 +11,8 @@
 #include "ble_server.h"
 #include "connection_handler.h"
 
+#include "driver/gpio.h"
+
 #define UART_TAG 		"UART"
 
 static QueueHandle_t		uart_send_queue				= NULL;
@@ -58,7 +60,7 @@ void uart_init()
 	uart_send_task_mutex	= xSemaphoreCreateMutex();
 	uart_buffer_mutex		= xSemaphoreCreateMutex();
 
-	ESP_LOGI(UART_TAG, "Init");
+	ESP_LOGI(UART_TAG, "uart_init");
 }
 
 void uart_deinit()
@@ -97,20 +99,23 @@ void uart_deinit()
 	}
 
 	if(didDeInit)
-		ESP_LOGI(UART_TAG, "Deinit");
+		ESP_LOGI(UART_TAG, "uart_deinit");
 }
 
 void uart_start_task()
 {
 	uart_stop_task();
 	uart_run_task = true;
-	ESP_LOGI(UART_TAG, "Tasks starting");
+
+	ESP_LOGI(UART_TAG, "uart_start_task - starting");
+
 	xSemaphoreTake(sync_task_sem, 0);
 	xTaskCreate(uart_receive_task, "UART_receive_process", TASK_STACK_SIZE, NULL, UART_TSK_PRIO, NULL);
 	xSemaphoreTake(sync_task_sem, portMAX_DELAY);
 	xTaskCreate(uart_send_task, "UART_send_process", TASK_STACK_SIZE, NULL, UART_TSK_PRIO, NULL);
 	xSemaphoreTake(sync_task_sem, portMAX_DELAY);
-	ESP_LOGI(UART_TAG, "Tasks started");
+
+	ESP_LOGI(UART_TAG, "uart_start_task - complete");
 }
 
 void uart_stop_task()
@@ -127,7 +132,7 @@ void uart_stop_task()
 		xSemaphoreTake(uart_send_task_mutex, portMAX_DELAY);
 		xSemaphoreGive(uart_send_task_mutex);
 
-		ESP_LOGI(UART_TAG, "Tasks stopped");
+		ESP_LOGI(UART_TAG, "uart_stop_task - stopped");
 	}
 }
 
@@ -230,34 +235,30 @@ bool16 uart_buffer_add(uint8_t* tmp_buffer, uint16_t size)
 	bool16 		over_flow 	= false;
 	uint16_t	tmp_pos 	= 0;
 
-	tMUTEX(uart_buffer_mutex);
-		//check for over flow of the buffer
-		if(size + uart_buffer_length > UART_BUFFER_SIZE) {
-			size = UART_BUFFER_SIZE - uart_buffer_length;
-			over_flow = true;
-		}
+	//check for over flow of the buffer
+	if(size + uart_buffer_length > UART_BUFFER_SIZE) {
+		size = UART_BUFFER_SIZE - uart_buffer_length;
+		over_flow = true;
+	}
 
-		//check current write position (buffer pos + length) and if its beyond buffer length, wrap
-		uint16_t write_pos = uart_buffer_pos + uart_buffer_length;
-		if(write_pos >= UART_BUFFER_SIZE)
-			write_pos -= UART_BUFFER_SIZE;
+	//check current write position (buffer pos + length) and if its beyond buffer length, wrap
+	uint16_t write_pos = (uart_buffer_pos + uart_buffer_length) % UART_BUFFER_SIZE;
 
-		//if the size of the data extends beyond end of buffer, write partial
-		if(write_pos + size > UART_BUFFER_SIZE) {
-			uint16_t partial_size = UART_BUFFER_SIZE - write_pos;
-			memcpy(&uart_buffer[write_pos], tmp_buffer, partial_size);
-			size -= partial_size;
-			uart_buffer_length += partial_size;
-			tmp_pos = partial_size;
-			write_pos = 0;
-		}
+	//if the size of the data extends beyond end of buffer, write partial
+	if(write_pos + size > UART_BUFFER_SIZE) {
+		uint16_t partial_size = UART_BUFFER_SIZE - write_pos;
+		memcpy(&uart_buffer[write_pos], tmp_buffer, partial_size);
+		size -= partial_size;
+		uart_buffer_length += partial_size;
+		tmp_pos = partial_size;
+		write_pos = 0;
+	}
 
-		//write the remaining data to buffer
-		if(size) {
-			memcpy(&uart_buffer[write_pos], &tmp_buffer[tmp_pos], size);
-			uart_buffer_length += size;
-		}
-	rMUTEX(uart_buffer_mutex);
+	//write the remaining data to buffer
+	if(size) {
+		memcpy(&uart_buffer[write_pos], &tmp_buffer[tmp_pos], size);
+		uart_buffer_length += size;
+	}
 
 	return over_flow;
 }
@@ -295,8 +296,7 @@ bool16 uart_buffer_get(uint8_t* tmp_buffer, uint16_t size)
 
 uint8_t uart_buffer_check_byte(uint16_t pos)
 {
-	uint16_t tmp_pos = uart_buffer_pos + pos;
-	if(tmp_pos >= UART_BUFFER_SIZE) tmp_pos -= UART_BUFFER_SIZE;
+	uint16_t tmp_pos = (uart_buffer_pos + pos) % UART_BUFFER_SIZE;
 	uint8_t tmp_data = uart_buffer[tmp_pos];
 
 	return tmp_data;
@@ -304,10 +304,8 @@ uint8_t uart_buffer_check_byte(uint16_t pos)
 
 uint16_t uart_buffer_check_word(uint16_t pos)
 {
-	uint16_t tmp_pos = uart_buffer_pos + pos;
-	uint16_t tmp_pos1 = tmp_pos + 1;
-	if(tmp_pos >= UART_BUFFER_SIZE) tmp_pos -= UART_BUFFER_SIZE;
-	if(tmp_pos1 >= UART_BUFFER_SIZE) tmp_pos1 -= UART_BUFFER_SIZE;
+	uint16_t tmp_pos = (uart_buffer_pos + pos) % UART_BUFFER_SIZE;
+	uint16_t tmp_pos1 = (tmp_pos + 1) % UART_BUFFER_SIZE;
 	uint16_t tmp_data = (uart_buffer[tmp_pos+1] << 8) + uart_buffer[tmp_pos];
 
 	return tmp_data;
