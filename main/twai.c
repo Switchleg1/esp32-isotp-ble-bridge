@@ -21,7 +21,7 @@ static const twai_general_config_t g_config = {
 	.rx_io = CAN_RX_PORT,
 	.clkout_io = CAN_CLK_IO,
 	.bus_off_io = CAN_BUS_IO,
-	.tx_queue_len = CAN_INTERNAL_BUFFER_SIZE,
+	.tx_queue_len = 0,
 	.rx_queue_len = CAN_INTERNAL_BUFFER_SIZE,
 	.alerts_enabled = CAN_ALERTS,
 	.clkout_divider = CAN_CLK_DIVIDER,
@@ -215,7 +215,7 @@ void twai_send(twai_message_t *twai_tx_msg)
 {
 	tMUTEX(twai_bus_off_mutex);
 	rMUTEX(twai_bus_off_mutex);
-	twai_transmit(twai_tx_msg, portMAX_DELAY);
+	while (twai_transmit(twai_tx_msg, portMAX_DELAY) == ESP_FAIL);
 }
 
 void twai_alert_task(void* arg)
@@ -244,7 +244,6 @@ void twai_alert_task(void* arg)
 					if (xSemaphoreTake(twai_bus_off_mutex, pdMS_TO_TICKS(TIMEOUT_NORMAL)) == pdTRUE) {
 						ESP_LOGW(TWAI_TAG, "Initiate bus recovery");
 						ESP_ERROR_CHECK(twai_initiate_recovery());    //Needs 128 occurrences of bus free signal
-						ESP_LOGI(TWAI_TAG, "Initiate bus recovery");
 					}
 				}
 

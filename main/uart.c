@@ -306,7 +306,7 @@ uint16_t uart_buffer_check_word(uint16_t pos)
 {
 	uint16_t tmp_pos = (uart_buffer_pos + pos) % UART_BUFFER_SIZE;
 	uint16_t tmp_pos1 = (tmp_pos + 1) % UART_BUFFER_SIZE;
-	uint16_t tmp_data = (uart_buffer[tmp_pos+1] << 8) + uart_buffer[tmp_pos];
+	uint16_t tmp_data = (uart_buffer[tmp_pos1] << 8) + uart_buffer[tmp_pos];
 
 	return tmp_data;
 }
