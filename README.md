@@ -16,6 +16,8 @@ https://play.google.com/store/apps/details?id=com.app.simostools<br>
 2) VW_Flash, python based ecu flashing and logging software: <br>
 https://github.com/bri3d/VW_Flash<br>
 
+3) Some other J2534 software
+
 # Supported hardware
 
 1) Genuine Macchina A0 <br>
