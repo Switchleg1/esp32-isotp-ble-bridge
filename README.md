@@ -6,7 +6,7 @@ Building and installing:
 1) This project is built using the ESP32 native toolchain ESP-IDF (based on FreeRTOS) and can be compiled using `idf.py build`
 
 2) Download and flash precompiled firmware: <br>
-https://github.com/Switchleg1/esp32-isotp-ble-bridge/releases/tag/v1.02
+https://github.com/Switchleg1/esp32-isotp-ble-bridge/releases/tag/v1.03
 
 # Supported software
 
